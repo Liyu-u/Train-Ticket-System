@@ -30,3 +30,16 @@ CREATE TABLE orders (
     order_status VARCHAR(20) DEFAULT 'PAID' COMMENT '状态：PAID(已支付), REFUNDED(已退票)',
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB COMMENT='交易订单表';
+
+CREATE TABLE users (
+    user_id VARCHAR(50) PRIMARY KEY COMMENT '用户唯一ID',
+    username VARCHAR(50) NOT NULL UNIQUE COMMENT '登录账号',
+    password VARCHAR(100) NOT NULL COMMENT '登录密码',
+    role_type VARCHAR(20) DEFAULT 'USER' COMMENT '核心标识：ADMIN(管理员), USER(普通旅客)',
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB COMMENT='全局用户与权限表';
+
+-- 插入一个管理员账号和一个普通测试账号
+INSERT INTO users (user_id, username, password, role_type) VALUES 
+('U_ADMIN_001', 'admin', '123456', 'ADMIN'),
+('U_PASS_001', 'zhangsan', '123456', 'USER');
