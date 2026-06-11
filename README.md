@@ -1,37 +1,24 @@
-# 基于MySQL数据库开发的购票系统
+# 火车站售票管理系统 (Train Ticket System)
 
-#### 介绍
-数据库期末大作业
+## 项目简介
+本项目是一个基于 Python 和 MySQL 开发的模拟火车站售票系统。系统深入参考了 12306 的核心业务逻辑，重点解决了**区间分段售票**和**高并发防超卖**等复杂数据库场景。
 
-#### 软件架构
-软件架构说明
+## 核心特性
+* **区间分段售票：** 底层采用二进制位图（Bitmap）与位运算，原子性实现车票区间的锁定与释放。
+* **高并发一致性：** 利用数据库事务（Transaction）与行级锁（Row Lock），彻底杜绝超卖现象。
+* **状态机引擎：** 标准化的订单状态流转（待支付 -> 已支付/已取消 -> 已出票 -> 已退票）。
+* **高级查询封装：** 使用视图（View）与存储过程（Stored Procedure）大幅优化多表联查性能。
 
+## 技术栈
+* **后端逻辑：** Python 3.x
+* **数据库引擎：** MySQL 5.7+ 
+* **驱动模块：** PyMySQL
 
-#### 安装教程
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 使用说明
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 参与贡献
-
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
-
-
-#### 特技
-
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+## 目录结构
+```text
+TrainTicketSystem/
+├── sql_scripts/       # SQL 脚本库 (建表语句、视图、存储过程、触发器)
+├── services/          # 核心业务模块 (如 ticket_service.py 购票服务)
+├── main.py            # 系统入口 (命令行交互菜单/API 路由)
+├── requirements.txt   # Python 依赖清单
+└── README.md          # 项目说明文档
