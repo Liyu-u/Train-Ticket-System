@@ -1,1 +1,9 @@
-# requirements.txt: 依赖包列表（占位文件）
+# requirements.txt: 项目依赖清单
+# 仅包含项目运行与测试所需的底层依赖，便于在演示机或阿里云上快速构建环境。
+# Project runtime dependencies
+pymysql>=1.0.2
+python-dotenv>=0.21.0
+Flask>=2.0.0
+
+# 如果后续需要性能测试、并发工具或更复杂的测试套件，可继续添加，如:
+# requests>=2.28.0

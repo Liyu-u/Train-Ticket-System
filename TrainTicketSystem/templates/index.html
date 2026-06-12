@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>火车票高并发抢票系统 - 演示大厅</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body>
+    <div class="container py-4">
+      <div id="nav-bar" style="display:block; text-align:right; margin-bottom:10px;">
+        <span id="user-info">未登录</span>
+        <button onclick="logout()" class="btn btn-sm btn-outline-secondary" style="margin-left:10px;">退出登录</button>
+      </div>
+
+      <h1 class="mb-3">🚄 极速抢票系统</h1>
+
+      <!-- 登录视图 -->
+      <div id="login-view" style="display:block;">
+        <h3>系统登录</h3>
+        <div class="mb-2">
+          <input id="username" class="form-control" placeholder="用户名" />
+        </div>
+        <div class="mb-2">
+          <input id="password" type="password" class="form-control" placeholder="密码" />
+        </div>
+        <div>
+          <button class="btn btn-primary" onclick="login()">登录</button>
+        </div>
+      </div>
+
+      <!-- User Portal -->
+      <div id="user-view" style="display:none; margin-top:20px;">
+        <h3>🎫 旅客购票大厅</h3>
+        <div class="mb-3">
+          <strong>1. 查询大盘</strong><br>
+          车次：
+          <select id="train-select" class="form-select d-inline-block" style="width:280px;"></select>
+          <button class="btn btn-secondary btn-sm" onclick="loadSeats()">加载座位</button>
+          <button class="btn btn-outline-secondary btn-sm" style="margin-left:8px;" onclick="loadTrainList()">刷新列表</button>
+        </div>
+
+        <div class="mb-3">
+          <strong>2. 发起购票</strong><br>
+          座位号: <input id="seat-no" class="form-control d-inline-block" style="width:120px;" />
+          掩码: <input id="mask" class="form-control d-inline-block" style="width:120px;" />
+          <button class="btn btn-success btn-sm" onclick="buyTicket()">一键抢票</button>
+        </div>
+      </div>
+
+      <!-- Admin Portal -->
+      <div id="admin-view" style="display:none; margin-top:20px;">
+        <h3>⚙️ 管理员调度中心</h3>
+
+        <div class="card mb-3">
+          <div class="card-body">
+            <h5 class="card-title">车次发版管理</h5>
+            <div class="row g-2 align-items-center">
+              <div class="col-md-3"><input id="admin-train-id" class="form-control" placeholder="车次编号(如 G101)" /></div>
+              <div class="col-md-3"><input id="admin-departure" class="form-control" placeholder="始发站" /></div>
+              <div class="col-md-3"><input id="admin-arrival" class="form-control" placeholder="终点站" /></div>
+              <div class="col-md-2"><input id="admin-price" class="form-control" placeholder="价格" /></div>
+              <div class="col-md-1"><button class="btn btn-primary" onclick="addOrUpdateTrain()">发布/更新</button></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <strong>强制退票 (测试触发器)</strong><br>
+          订单号: <input id="refund-order" class="form-control d-inline-block" style="width:240px;" />
+          <button class="btn btn-danger btn-sm" onclick="refundTicket()">确认退票</button>
+        </div>
+
+        <div class="mb-3">
+          <strong>系统财务大盘 (测试视图)</strong><br>
+          <button class="btn btn-outline-primary btn-sm" onclick="loadFinancial()">一键核算账单</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    // 页面加载时立刻检查身份并加载车次列表
+    window.onload = function() { 
+      checkAuth(); 
+      loadTrainList(); // 自动加载车次列表
+    }
+
+    function checkAuth() {
+        const role = localStorage.getItem('role');
+        const username = localStorage.getItem('username');
+        
+        // 核心隔离逻辑：强行控制面板显示/隐藏
+        if (!role) {
+            document.getElementById('login-view').style.display = 'block';
+            document.getElementById('user-view').style.display = 'none';
+            document.getElementById('admin-view').style.display = 'none';
+            document.getElementById('nav-bar').style.display = 'none';
+        } else if (role === 'admin') {
+            document.getElementById('login-view').style.display = 'none';
+            document.getElementById('user-view').style.display = 'none';      // 管理员看不到普通购票大厅
+            document.getElementById('admin-view').style.display = 'block';    // 管理员只看调度中心
+            document.getElementById('nav-bar').style.display = 'block';
+            document.getElementById('user-info').innerText = '当前身份: 管理员 (ADMIN)';
+        } else if (role === 'user') {
+            document.getElementById('login-view').style.display = 'none';
+            document.getElementById('user-view').style.display = 'block';     // 旅客只看购票大厅
+            document.getElementById('admin-view').style.display = 'none';     // 旅客绝对看不到调度中心
+            document.getElementById('nav-bar').style.display = 'block';
+            document.getElementById('user-info').innerText = '当前身份: 旅客 (' + username + ')';
+        }
+    }
+
+    function login() {
+      const u = document.getElementById('username').value;
+      const p = document.getElementById('password').value;
+      fetch('/api/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: u, password: p})
+      }).then(res => res.json()).then(data => {
+        if(data.success) {
+          localStorage.setItem('role', data.role);
+          localStorage.setItem('username', data.username);
+          checkAuth(); // 登录成功后立刻重新渲染界面
+          // 在旅客界面加载车次下拉
+          if (data.role === 'user') populateTrainSelect();
+        } else {
+          alert(data.message);
+        }
+      });
+    }
+
+    function logout() {
+      fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }).finally(()=>{
+        localStorage.clear();
+        checkAuth();
+      });
+    }
+
+    // --- 下面是业务接口调用 (保留您的原生请求即可) ---
+    async function populateTrainSelect() {
+      const sel = document.getElementById('train-select');
+      sel.innerHTML = '';
+      try {
+        const res = await fetch('/api/trains');
+        const data = await res.json();
+        if (!Array.isArray(data)) return;
+        data.forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t.train_id;
+          opt.text = `${t.train_id} (${t.departure_station||t.departure}-${t.arrival_station||t.arrival})`;
+          sel.appendChild(opt);
+        });
+      } catch (e) {
+        console.error('加载车次失败', e);
+      }
+    }
+
+    // 专门用来获取车次列表并填充到下拉框的函数
+    function loadTrainList() {
+      fetch('/api/trains')
+        .then(res => res.json())
+        .then(data => {
+          const select = document.getElementById('train-select');
+          select.innerHTML = ''; // 先清空
+          (data || []).forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.train_id;
+            opt.innerText = `${t.train_no || t.train_id} (${t.departure_station || t.departure || ''} -> ${t.arrival_station || t.arrival || ''})`;
+            select.appendChild(opt);
+          });
+        }).catch(e => console.error('loadTrainList error', e));
+    }
+
+    function loadSeats() {
+      const trainId = document.getElementById('train-select').value;
+      fetch('/api/seats?train_id=' + encodeURIComponent(trainId)).then(res=>res.json()).then(d=>alert('查票接口已触发，请结合您的实际返回渲染'));
+    }
+
+    function buyTicket() {
+      const trainId = document.getElementById('train-select').value;
+      const seat = document.getElementById('seat-no').value;
+      const maskStr = document.getElementById('mask').value || '0';
+      let buy_mask = 0;
+      try {
+        if (typeof maskStr === 'string' && maskStr.startsWith('0b')) buy_mask = parseInt(maskStr.slice(2), 2);
+        else if (typeof maskStr === 'string') buy_mask = parseInt(maskStr, 2);
+        else buy_mask = Number(maskStr) || 0;
+      } catch (e) { buy_mask = 0; }
+
+      fetch('/api/buy', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ train_id: trainId, carriage_no: 1, seat_no: seat, buy_mask: buy_mask })
+      }).then(res=>res.json()).then(d=>{ alert('购票接口返回: ' + JSON.stringify(d)); });
+    }
+
+    function refundTicket() { 
+      const oid = document.getElementById('refund-order').value.trim();
+      if (!oid) { alert('请输入订单号'); return; }
+      fetch('/api/refund', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body: JSON.stringify({order_id: oid})}).then(res=>res.json()).then(d=>alert('退票返回: '+JSON.stringify(d))); }
+
+    function loadFinancial() { fetch('/api/financial', {credentials:'same-origin'}).then(res=>res.json()).then(d=>alert('财务接口返回: ' + JSON.stringify(d))); }
+
+    async function addOrUpdateTrain() {
+      const train_id = document.getElementById('admin-train-id').value.trim();
+      const departure = document.getElementById('admin-departure').value.trim();
+      const arrival = document.getElementById('admin-arrival').value.trim();
+      const price = document.getElementById('admin-price').value.trim() || 0;
+      if (!train_id || !departure || !arrival) { alert('请填写车次、始发站和终点站'); return; }
+      const payload = { train_id: train_id, train_no: train_id, departure: departure, arrival: arrival, price: price };
+      try {
+        const res = await fetch('/api/add_train', { method: 'POST', credentials: 'same-origin', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        const j = await res.json();
+        if (res.ok) {
+          alert('发布/更新成功: ' + JSON.stringify(j));
+          // 若发布成功，刷新下拉列表以便旅客立刻选择
+          populateTrainSelect();
+        } else {
+          alert('发布失败: ' + JSON.stringify(j));
+        }
+      } catch (e) { alert('请求出错: '+e); }
+    }
+
+    </script>
+  </body>
+</html>
