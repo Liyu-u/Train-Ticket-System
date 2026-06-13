@@ -1,229 +1,659 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>火车票高并发抢票系统 - 演示大厅</title>
+<head>
+    <meta charset="UTF-8">
+    <title>极速抢票系统</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  </head>
-  <body>
-    <div class="container py-4">
-      <div id="nav-bar" style="display:block; text-align:right; margin-bottom:10px;">
-        <span id="user-info">未登录</span>
-        <button onclick="logout()" class="btn btn-sm btn-outline-secondary" style="margin-left:10px;">退出登录</button>
-      </div>
+</head>
+<body class="bg-light">
 
-      <h1 class="mb-3">🚄 极速抢票系统</h1>
-
-      <!-- 登录视图 -->
-      <div id="login-view" style="display:block;">
-        <h3>系统登录</h3>
-        <div class="mb-2">
-          <input id="username" class="form-control" placeholder="用户名" />
+<nav class="navbar navbar-dark bg-dark shadow-sm" id="nav-bar" style="display: none;">
+    <div class="container-fluid">
+        <span class="navbar-brand mb-0 h1">🚄 极速抢票系统</span>
+        <div class="d-flex align-items-center">
+            <span class="text-white me-3" id="user-info"></span>
+            <button class="btn btn-outline-light btn-sm" onclick="logout()">退出登录</button>
         </div>
-        <div class="mb-2">
-          <input id="password" type="password" class="form-control" placeholder="密码" />
-        </div>
-        <div>
-          <button class="btn btn-primary" onclick="login()">登录</button>
-        </div>
-      </div>
+    </div>
+</nav>
 
-      <!-- User Portal -->
-      <div id="user-view" style="display:none; margin-top:20px;">
-        <h3>🎫 旅客购票大厅</h3>
-        <div class="mb-3">
-          <strong>1. 查询大盘</strong><br>
-          车次：
-          <select id="train-select" class="form-select d-inline-block" style="width:280px;"></select>
-          <button class="btn btn-secondary btn-sm" onclick="loadSeats()">加载座位</button>
-          <button class="btn btn-outline-secondary btn-sm" style="margin-left:8px;" onclick="loadTrainList()">刷新列表</button>
-        </div>
-
-        <div class="mb-3">
-          <strong>2. 发起购票</strong><br>
-          座位号: <input id="seat-no" class="form-control d-inline-block" style="width:120px;" />
-          掩码: <input id="mask" class="form-control d-inline-block" style="width:120px;" />
-          <button class="btn btn-success btn-sm" onclick="buyTicket()">一键抢票</button>
-        </div>
-      </div>
-
-      <!-- Admin Portal -->
-      <div id="admin-view" style="display:none; margin-top:20px;">
-        <h3>⚙️ 管理员调度中心</h3>
-
-        <div class="card mb-3">
-          <div class="card-body">
-            <h5 class="card-title">车次发版管理</h5>
-            <div class="row g-2 align-items-center">
-              <div class="col-md-3"><input id="admin-train-id" class="form-control" placeholder="车次编号(如 G101)" /></div>
-              <div class="col-md-3"><input id="admin-departure" class="form-control" placeholder="始发站" /></div>
-              <div class="col-md-3"><input id="admin-arrival" class="form-control" placeholder="终点站" /></div>
-              <div class="col-md-2"><input id="admin-price" class="form-control" placeholder="价格" /></div>
-              <div class="col-md-1"><button class="btn btn-primary" onclick="addOrUpdateTrain()">发布/更新</button></div>
+<div class="container mt-5">
+    
+    <div id="login-view" class="card mx-auto shadow border-0" style="max-width: 400px; display: block;">
+        <div class="card-header bg-primary text-white text-center fs-5 fw-bold">系统登录</div>
+        <div class="card-body p-4">
+            <div class="mb-3">
+                <label class="form-label text-muted small">用户名</label>
+                <input type="text" id="username" class="form-control" placeholder="输入 admin 或 zhangsan">
             </div>
-          </div>
+            <div class="mb-4">
+                <label class="form-label text-muted small">密码</label>
+                <input type="password" id="password" class="form-control" placeholder="输入 123456">
+            </div>
+            <button class="btn btn-primary w-100 fw-bold" onclick="login()">立 即 登 录</button>
         </div>
-
-        <div class="mb-3">
-          <strong>强制退票 (测试触发器)</strong><br>
-          订单号: <input id="refund-order" class="form-control d-inline-block" style="width:240px;" />
-          <button class="btn btn-danger btn-sm" onclick="refundTicket()">确认退票</button>
-        </div>
-
-        <div class="mb-3">
-          <strong>系统财务大盘 (测试视图)</strong><br>
-          <button class="btn btn-outline-primary btn-sm" onclick="loadFinancial()">一键核算账单</button>
-        </div>
-      </div>
     </div>
 
-    <script>
-    // 页面加载时立刻检查身份并加载车次列表
+    <div id="user-view" style="display: none;">
+        <h3 class="text-success border-bottom pb-2 mb-4">🎫 旅客购票大厅</h3>
+        
+        <div class="card mb-4 shadow-sm border-0">
+            <div class="card-body">
+                <h5 class="card-title fw-bold">1. 查询大盘</h5>
+                <div class="d-flex gap-2 align-items-center mt-3">
+                    <label>车次：</label>
+                    <select id="train-select" class="form-select w-25" onchange="loadStopsForBuy()"></select>
+                    <button class="btn btn-info text-white" onclick="loadTrainList()">🔄 刷新车次</button>
+                    <button class="btn btn-outline-success" onclick="loadSeats()">加载座位空闲状态</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0 mb-4">
+            <div class="card-body">
+                <h5 class="card-title fw-bold">2. 发起购票 <small class="text-muted fw-normal">(动态路由 — 选站自动算掩码)</small></h5>
+                <div class="row g-2 align-items-end mt-2">
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">座位号</label>
+                        <input type="text" id="buy-seat" class="form-control" placeholder="如 01A" style="width:90px;">
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">上车站</label>
+                        <select id="buy-start-station" class="form-select" style="width:120px;"
+                                onchange="updateEndStationOptions()"></select>
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">→ 下车站</label>
+                        <select id="buy-end-station" class="form-select" style="width:120px;"></select>
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-success px-4" onclick="buyTicket()">🚄 一键抢票</button>
+                    </div>
+                    <div class="col-auto">
+                        <a href="#" class="small text-secondary" onclick="toggleMaskMode();return false;"
+                           title="高级：手动输入二进制掩码">⚙ 手动掩码</a>
+                    </div>
+                </div>
+                <div id="mask-mode-row" class="row g-2 align-items-end mt-2" style="display:none;">
+                    <div class="col-auto">
+                        <label class="form-label small text-muted mb-1">手动掩码</label>
+                        <input type="text" id="buy-mask" class="form-control" placeholder="如 0b11 或 3" style="width:140px;">
+                    </div>
+                    <div class="col-auto">
+                        <small class="text-warning">手动模式下将忽略上/下车站选择</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0 mb-4">
+            <div class="card-body">
+                <h5 class="card-title fw-bold">3. 座位实时状态</h5>
+                <div id="seat-display" class="bg-light p-3 rounded mt-3" style="min-height: 50px; font-family: monospace; white-space: pre-wrap;">
+                    点击上方「加载座位空闲状态」按钮查看
+                </div>
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0">
+            <div class="card-body">
+                <h5 class="card-title fw-bold">4. 我的车票 <small class="text-muted fw-normal" id="order-count"></small></h5>
+                <div class="table-responsive mt-3">
+                    <table class="table table-hover table-sm align-middle" id="my-orders-table">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>订单号</th>
+                                <th>车次</th>
+                                <th>行程</th>
+                                <th>座位</th>
+                                <th>票价</th>
+                                <th>状态</th>
+                                <th>下单时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="my-orders-body">
+                            <tr><td colspan="8" class="text-center text-muted py-3">点击上方「加载座位空闲状态」或购票后将自动加载</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="admin-view" style="display: none;">
+        <h3 class="text-danger border-bottom pb-2 mb-4">⚙️ 管理员调度中心</h3>
+        
+        <div class="card border-danger mb-4 shadow-sm">
+            <div class="card-header bg-danger text-white fw-bold">
+                发布新车次 <small class="text-white-50">(配置经停站 + 自动生成 5 个测试座位)</small>
+            </div>
+            <div class="card-body">
+                <!-- ──────── 基础信息区 ──────── -->
+                <div class="row g-2 mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted mb-1">车次编号 <span class="text-danger">*</span></label>
+                        <input type="text" id="new-train-id" class="form-control" placeholder="如 G888">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted mb-1">票价 (¥)</label>
+                        <input type="number" id="new-price" class="form-control" placeholder="300" value="300" min="0" step="0.01">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted mb-1">首发时间 <span class="text-danger">*</span></label>
+                        <input type="datetime-local" id="new-departure-time" class="form-control">
+                    </div>
+                </div>
+
+                <!-- ──────── 动态经停站区 ──────── -->
+                <label class="form-label small text-muted mb-1 mt-2">
+                    经停站列表 <span class="text-danger">(至少 2 站；stop_index 按排列顺序自动生成)</span>
+                </label>
+                <div id="stops-container">
+                    <!-- 动态注入 stop-row -->
+                </div>
+                <button class="btn btn-outline-secondary btn-sm mt-2" onclick="addStopRow()">
+                    ➕ 添加经停站
+                </button>
+
+                <hr>
+                <button class="btn btn-danger w-100 fw-bold" onclick="publishTrain()">
+                    🚀 确认发布（自动写入车次 + 路由 + 5个测试座位）
+                </button>
+                <div id="publish-feedback" class="mt-2 small"></div>
+            </div>
+        </div>
+
+        <div class="card border-warning mb-4 shadow-sm">
+            <div class="card-header bg-warning text-dark fw-bold">强制退票 (测试底层触发器)</div>
+            <div class="card-body d-flex gap-2 align-items-center">
+                <input type="text" id="refund-order" class="form-control w-50" placeholder="粘贴 ORD... 订单号">
+                <button class="btn btn-warning" onclick="refundTicket()">确认退票</button>
+            </div>
+        </div>
+
+        <div class="card border-info shadow-sm">
+            <div class="card-header bg-info text-white fw-bold">系统财务大盘 (测试数据库视图)</div>
+            <div class="card-body">
+                <button class="btn btn-outline-info mb-3" onclick="loadFinancial()">一键核算实时账单</button>
+                <div id="financial-display" class="bg-light p-3 rounded" style="min-height: 50px;">这里将显示财务数据...</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    // 页面加载时自动检查登录状态并加载车次
     window.onload = function() { 
-      checkAuth(); 
-      loadTrainList(); // 自动加载车次列表
+        checkAuth(); 
+        if(localStorage.getItem('role') === 'user') loadTrainList();
     }
 
     function checkAuth() {
-        const role = localStorage.getItem('role');
+        let role = localStorage.getItem('role'); // 拿到的可能是大写，也可能是小写
         const username = localStorage.getItem('username');
         
-        // 核心隔离逻辑：强行控制面板显示/隐藏
         if (!role) {
             document.getElementById('login-view').style.display = 'block';
             document.getElementById('user-view').style.display = 'none';
             document.getElementById('admin-view').style.display = 'none';
             document.getElementById('nav-bar').style.display = 'none';
-        } else if (role === 'admin') {
-            document.getElementById('login-view').style.display = 'none';
-            document.getElementById('user-view').style.display = 'none';      // 管理员看不到普通购票大厅
-            document.getElementById('admin-view').style.display = 'block';    // 管理员只看调度中心
-            document.getElementById('nav-bar').style.display = 'block';
-            document.getElementById('user-info').innerText = '当前身份: 管理员 (ADMIN)';
-        } else if (role === 'user') {
-            document.getElementById('login-view').style.display = 'none';
-            document.getElementById('user-view').style.display = 'block';     // 旅客只看购票大厅
-            document.getElementById('admin-view').style.display = 'none';     // 旅客绝对看不到调度中心
-            document.getElementById('nav-bar').style.display = 'block';
-            document.getElementById('user-info').innerText = '当前身份: 旅客 (' + username + ')';
+        } else {
+            role = role.toLowerCase(); // 【核心修复】：不管三七二十一，全给它转成小写再判断！
+            
+            if (role === 'admin') {
+                document.getElementById('login-view').style.display = 'none';
+                document.getElementById('user-view').style.display = 'none';
+                document.getElementById('admin-view').style.display = 'block';
+                document.getElementById('nav-bar').style.display = 'flex';
+                document.getElementById('user-info').innerText = '管理员 (' + username + ')';
+                initStopRows();  // 初始化经停站表单
+            } else if (role === 'user') {
+                document.getElementById('login-view').style.display = 'none';
+                document.getElementById('user-view').style.display = 'block';
+                document.getElementById('admin-view').style.display = 'none';
+                document.getElementById('nav-bar').style.display = 'flex';
+                document.getElementById('user-info').innerText = '旅客 (' + username + ')';
+                loadTrainList();  // 加载车次下拉框
+                loadMyOrders();   // 加载个人订单列表
+            }
         }
     }
 
     function login() {
-      const u = document.getElementById('username').value;
-      const p = document.getElementById('password').value;
-      fetch('/api/login', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({username: u, password: p})
-      }).then(res => res.json()).then(data => {
-        if(data.success) {
-          localStorage.setItem('role', data.role);
-          localStorage.setItem('username', data.username);
-          checkAuth(); // 登录成功后立刻重新渲染界面
-          // 在旅客界面加载车次下拉
-          if (data.role === 'user') populateTrainSelect();
-        } else {
-          alert(data.message);
-        }
-      });
+        const u = document.getElementById('username').value;
+        const p = document.getElementById('password').value;
+        if(!u || !p) { alert('请输入账号和密码！'); return; }
+        
+        fetch('/api/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username: u, password: p})
+        }).then(res => res.json()).then(data => {
+            if(data.success) {
+                localStorage.setItem('role', data.role);
+                localStorage.setItem('username', data.username);
+                checkAuth();
+            } else {
+                alert(data.message);
+            }
+        }).catch(err => alert('网络请求失败，请检查后端运行状态'));
     }
 
     function logout() {
-      fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }).finally(()=>{
-        localStorage.clear();
-        checkAuth();
-      });
-    }
-
-    // --- 下面是业务接口调用 (保留您的原生请求即可) ---
-    async function populateTrainSelect() {
-      const sel = document.getElementById('train-select');
-      sel.innerHTML = '';
-      try {
-        const res = await fetch('/api/trains');
-        const data = await res.json();
-        if (!Array.isArray(data)) return;
-        data.forEach(t => {
-          const opt = document.createElement('option');
-          opt.value = t.train_id;
-          opt.text = `${t.train_id} (${t.departure_station||t.departure}-${t.arrival_station||t.arrival})`;
-          sel.appendChild(opt);
+        fetch('/api/logout', {method: 'POST'}).then(() => {
+            localStorage.clear();
+            checkAuth();
         });
-      } catch (e) {
-        console.error('加载车次失败', e);
-      }
     }
 
-    // 专门用来获取车次列表并填充到下拉框的函数
     function loadTrainList() {
-      fetch('/api/trains')
-        .then(res => res.json())
-        .then(data => {
-          const select = document.getElementById('train-select');
-          select.innerHTML = ''; // 先清空
-          (data || []).forEach(t => {
-            const opt = document.createElement('option');
-            opt.value = t.train_id;
-            opt.innerText = `${t.train_no || t.train_id} (${t.departure_station || t.departure || ''} -> ${t.arrival_station || t.arrival || ''})`;
-            select.appendChild(opt);
-          });
-        }).catch(e => console.error('loadTrainList error', e));
+        fetch('/api/trains').then(res => res.json()).then(data => {
+            const select = document.getElementById('train-select');
+            select.innerHTML = '';
+            data.forEach(t => {
+                const opt = document.createElement('option');
+                // 兼容各种可能的后端字段命名
+                const trainId = t.train_id || t.train_no;
+                const dep = t.departure || t.departure_station || '未知起点';
+                const arr = t.arrival || t.arrival_station || '未知终点';
+                const price = t.price || 0;
+
+                opt.value = trainId;
+                opt.innerText = `${trainId} (${dep} -> ${arr}) - ￥${price}`;
+                select.appendChild(opt);
+            });
+            // 加载完车次列表后，自动加载当前选中车次的停靠站
+            loadStopsForBuy();
+        });
+    }
+
+    function loadStopsForBuy() {
+        const trainId = document.getElementById('train-select').value;
+        if (!trainId) return;
+
+        fetch('/api/stops/' + encodeURIComponent(trainId))
+            .then(res => res.json())
+            .then(stops => {
+                if (!stops || stops.length === 0) {
+                    // 无停靠站数据时回退到手动掩码模式
+                    document.getElementById('buy-start-station').innerHTML = '<option value="">-- 无站点数据 --</option>';
+                    document.getElementById('buy-end-station').innerHTML = '<option value="">-- 请使用手动掩码 --</option>';
+                    return;
+                }
+                // 填充两个下拉框
+                ['buy-start-station', 'buy-end-station'].forEach(did => {
+                    const sel = document.getElementById(did);
+                    sel.innerHTML = stops.map(s =>
+                        `<option value="${s.station_name}">[${s.stop_index}] ${s.station_name}</option>`
+                    ).join('');
+                });
+                // 默认：起点=首站，终点=末站
+                document.getElementById('buy-start-station').selectedIndex = 0;
+                document.getElementById('buy-end-station').selectedIndex = stops.length - 1;
+                updateEndStationOptions();
+            })
+            .catch(() => {
+                // 静默失败，用户仍可通过手动掩码模式购票
+            });
+    }
+
+    // 下车站只能选在上车站之后
+    function updateEndStationOptions() {
+        const startSel = document.getElementById('buy-start-station');
+        const endSel = document.getElementById('buy-end-station');
+        const startIdx = startSel.selectedIndex;  // option index = stop_index (因为按序排列)
+        const currentEndVal = endSel.value;
+
+        for (let i = 0; i < endSel.options.length; i++) {
+            endSel.options[i].disabled = (i <= startIdx);
+        }
+        // 如果当前选中的终点不合法，自动跳到第一个合法选项
+        if (endSel.selectedIndex <= startIdx) {
+            for (let i = startIdx + 1; i < endSel.options.length; i++) {
+                if (!endSel.options[i].disabled) {
+                    endSel.selectedIndex = i;
+                    break;
+                }
+            }
+        }
     }
 
     function loadSeats() {
-      const trainId = document.getElementById('train-select').value;
-      fetch('/api/seats?train_id=' + encodeURIComponent(trainId)).then(res=>res.json()).then(d=>alert('查票接口已触发，请结合您的实际返回渲染'));
+        const trainId = document.getElementById('train-select').value;
+        if (!trainId) { alert('请先选择一个车次'); return; }
+
+        const displayEl = document.getElementById('seat-display');
+        displayEl.innerText = '加载中...';
+
+        // 同时拉取座位和停靠站数据
+        Promise.all([
+            fetch('/api/seats?train_id=' + encodeURIComponent(trainId)).then(r => r.json()),
+            fetch('/api/stops/' + encodeURIComponent(trainId)).then(r => r.json()).catch(() => [])
+        ]).then(([seatData, stopsData]) => {
+            // 构建停靠站说明
+            let header = '';
+            if (stopsData && stopsData.length > 0) {
+                header = '停靠站映射：';
+                const segs = [];
+                for (let i = 0; i < stopsData.length - 1; i++) {
+                    segs.push(`[bit${i}] ${stopsData[i].station_name}→${stopsData[i+1].station_name}`);
+                }
+                header += segs.join(' | ') + '\n\n';
+            }
+
+            if (!seatData || seatData.length === 0) {
+                displayEl.innerText = header + '该车次暂无座位数据';
+                return;
+            }
+
+            let text = header;
+            text += '车厢\t座位号\t空闲状态\t\t当前位图\n';
+            text += '─'.repeat(55) + '\n';
+            seatData.forEach(s => {
+                const free = s.seat_bitmap === 0;
+                const statusIcon = free ? '🟢 空闲' : '🔴 占用';
+                const maskInfo = '0b' + s.seat_bitmap.toString(2).padStart(5, '0');
+                text += `${s.carriage_no}\t${s.seat_no}\t${statusIcon}\t\t${maskInfo}`;
+                if (!free) {
+                    text += ` (与默认 0b${s.default_mask.toString(2).padStart(5,'0')} 冲突)`;
+                }
+                text += '\n';
+            });
+            displayEl.innerText = text;
+        }).catch(err => {
+            displayEl.innerText = '查询失败：' + err;
+        });
+    }
+
+    // ===================================================================
+    // 管理员：发布新车次（含经停站 + 自动生成座位）
+    // ===================================================================
+
+    // 页面加载后初始化 2 个默认经停站行
+    function initStopRows() {
+        const container = document.getElementById('stops-container');
+        if (container.children.length > 0) return;  // 幂等
+        addStopRow();  // 第 1 站
+        addStopRow();  // 第 2 站
+    }
+
+    function addStopRow() {
+        const container = document.getElementById('stops-container');
+        const idx = container.children.length;
+
+        const row = document.createElement('div');
+        row.className = 'row g-2 mb-1 stop-row';
+        row.innerHTML = `
+            <div class="col-md-4">
+                <input type="text" class="form-control form-control-sm stop-name"
+                       placeholder="${idx === 0 ? '始发站 如 北京南' : idx === 1 ? '终点站 如 上海虹桥' : '经停站名'}">
+            </div>
+            <div class="col-md-3">
+                <input type="datetime-local" class="form-control form-control-sm stop-arr"
+                       ${idx === 0 ? 'disabled title="首站无到站时间"' : ''}>
+            </div>
+            <div class="col-md-3">
+                <input type="datetime-local" class="form-control form-control-sm stop-dep">
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-outline-danger btn-sm remove-stop-btn"
+                        onclick="removeStopRow(this)" title="删除此站">✕</button>
+            </div>
+        `;
+        container.appendChild(row);
+        updateRemoveButtons();
+    }
+
+    function removeStopRow(btn) {
+        const container = document.getElementById('stops-container');
+        if (container.children.length <= 2) {
+            alert('至少保留 2 个停靠站（起点和终点）');
+            return;
+        }
+        btn.closest('.stop-row').remove();
+        updateRemoveButtons();
+    }
+
+    function updateRemoveButtons() {
+        const container = document.getElementById('stops-container');
+        const rows = container.querySelectorAll('.stop-row');
+        const canRemove = rows.length > 2;
+        rows.forEach(row => {
+            const btn = row.querySelector('.remove-stop-btn');
+            if (btn) btn.disabled = !canRemove;
+        });
+        // 更新首行 arr 禁用状态 & 末行 dep 提示
+        if (rows.length > 0) {
+            const firstArr = rows[0].querySelector('.stop-arr');
+            if (firstArr) { firstArr.disabled = true; firstArr.placeholder = '首站无到站'; }
+        }
+    }
+
+    function publishTrain() {
+        const trainId = document.getElementById('new-train-id').value.trim();
+        const price = parseFloat(document.getElementById('new-price').value) || 0;
+        const depTime = document.getElementById('new-departure-time').value;
+
+        // 基础校验
+        if (!trainId) { alert('请输入车次编号'); return; }
+        if (!depTime) { alert('请选择首发时间'); return; }
+
+        // 收集经停站
+        const stopRows = document.querySelectorAll('#stops-container .stop-row');
+        const stops = [];
+        stopRows.forEach(row => {
+            const name = row.querySelector('.stop-name').value.trim();
+            const arr  = row.querySelector('.stop-arr').value || null;
+            const dep  = row.querySelector('.stop-dep').value || null;
+            if (!name) return;  // 跳过空行
+            stops.push({
+                station_name: name,
+                arr: arr,
+                dep: dep
+            });
+        });
+
+        if (stops.length < 2) {
+            alert('请至少填写 2 个停靠站（起点和终点）');
+            return;
+        }
+
+        // 自动推导 departure / arrival
+        const departure = stops[0].station_name;
+        const arrival   = stops[stops.length - 1].station_name;
+
+        // 构造请求体
+        const body = {
+            train_id: trainId,
+            price: price,
+            departure_time: depTime,
+            stops: stops
+        };
+
+        const fb = document.getElementById('publish-feedback');
+        fb.innerHTML = '<span class="text-info">发布中，请稍候...</span>';
+
+        fetch('/api/add_train', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        }).then(res => res.json()).then(d => {
+            if (d.ok) {
+                fb.innerHTML = `<span class="text-success">✅ 车次 <strong>${d.train_id}</strong> 发布成功！`
+                    + `${d.stops} 个经停站 + ${d.seats} 个座位已就绪。</span>`;
+                alert(`✅ 车次 ${d.train_id} 发布成功！\n经停站: ${d.stops} 站\n座位: ${d.seats} 个`);
+                // 清空表单方便继续发布
+                document.getElementById('new-train-id').value = '';
+                document.getElementById('stops-container').innerHTML = '';
+                initStopRows();
+            } else {
+                fb.innerHTML = `<span class="text-danger">❌ 发布失败：${d.error}</span>`;
+                alert('发布失败: ' + d.error);
+            }
+        }).catch(err => {
+            fb.innerHTML = `<span class="text-danger">❌ 网络请求失败</span>`;
+            alert('网络请求失败: ' + err);
+        });
     }
 
     function buyTicket() {
-      const trainId = document.getElementById('train-select').value;
-      const seat = document.getElementById('seat-no').value;
-      const maskStr = document.getElementById('mask').value || '0';
-      let buy_mask = 0;
-      try {
-        if (typeof maskStr === 'string' && maskStr.startsWith('0b')) buy_mask = parseInt(maskStr.slice(2), 2);
-        else if (typeof maskStr === 'string') buy_mask = parseInt(maskStr, 2);
-        else buy_mask = Number(maskStr) || 0;
-      } catch (e) { buy_mask = 0; }
+        const trainId = document.getElementById('train-select').value;
+        const seatNo = document.getElementById('buy-seat').value.trim();
+        if (!trainId) { alert('请先在车次下拉框中选择一个车次'); return; }
+        if (!seatNo)  { alert('请输入座位号 (如 01A)'); return; }
 
-      fetch('/api/buy', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ train_id: trainId, carriage_no: 1, seat_no: seat, buy_mask: buy_mask })
-      }).then(res=>res.json()).then(d=>{ alert('购票接口返回: ' + JSON.stringify(d)); });
-    }
+        const maskRow = document.getElementById('mask-mode-row');
+        const useMaskMode = (maskRow.style.display !== 'none');
 
-    function refundTicket() { 
-      const oid = document.getElementById('refund-order').value.trim();
-      if (!oid) { alert('请输入订单号'); return; }
-      fetch('/api/refund', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body: JSON.stringify({order_id: oid})}).then(res=>res.json()).then(d=>alert('退票返回: '+JSON.stringify(d))); }
+        let body = { train_id: trainId, seat_no: seatNo };
 
-    function loadFinancial() { fetch('/api/financial', {credentials:'same-origin'}).then(res=>res.json()).then(d=>alert('财务接口返回: ' + JSON.stringify(d))); }
-
-    async function addOrUpdateTrain() {
-      const train_id = document.getElementById('admin-train-id').value.trim();
-      const departure = document.getElementById('admin-departure').value.trim();
-      const arrival = document.getElementById('admin-arrival').value.trim();
-      const price = document.getElementById('admin-price').value.trim() || 0;
-      if (!train_id || !departure || !arrival) { alert('请填写车次、始发站和终点站'); return; }
-      const payload = { train_id: train_id, train_no: train_id, departure: departure, arrival: arrival, price: price };
-      try {
-        const res = await fetch('/api/add_train', { method: 'POST', credentials: 'same-origin', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-        const j = await res.json();
-        if (res.ok) {
-          alert('发布/更新成功: ' + JSON.stringify(j));
-          // 若发布成功，刷新下拉列表以便旅客立刻选择
-          populateTrainSelect();
+        if (useMaskMode) {
+            // 手动掩码模式（兼容旧版 / 高级用户）
+            const buyMask = document.getElementById('buy-mask').value.trim();
+            if (!buyMask) { alert('请输入购票区间掩码 (如 0b11 或 3)'); return; }
+            body.buy_mask = buyMask;
         } else {
-          alert('发布失败: ' + JSON.stringify(j));
+            // 动态路由模式（推荐）
+            const startStation = document.getElementById('buy-start-station').value;
+            const endStation   = document.getElementById('buy-end-station').value;
+            if (!startStation || !endStation) {
+                alert('请选择上车站和下车站（或切换到"手动掩码"模式）');
+                return;
+            }
+            if (startStation === endStation) {
+                alert('上车站和下车站不能相同！');
+                return;
+            }
+            body.start_station = startStation;
+            body.end_station   = endStation;
         }
-      } catch (e) { alert('请求出错: '+e); }
+
+        fetch('/api/buy', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        }).then(res => res.json()).then(data => {
+            if (data.success) {
+                let msg = '✅ 购票成功！订单号：' + data.order_id;
+                if (data.buy_mask !== undefined) {
+                    msg += '\n计算掩码：' + data.buy_mask + ' (0b' + data.buy_mask.toString(2) + ')';
+                }
+                if (data.segments) {
+                    msg += '\n购买区间数：' + data.segments;
+                }
+                msg += '\n请保存订单号以便后续退票。';
+                alert(msg);
+                loadSeats();     // 购票后自动刷新座位状态
+                loadMyOrders(); // 购票后自动刷新我的车票
+            } else {
+                alert('❌ 购票失败：' + (data.reason || '座位区间冲突或座位不存在'));
+            }
+        }).catch(err => {
+            alert('网络请求失败，请检查后端运行状态：' + err);
+        });
     }
 
-    </script>
-  </body>
+    // 切换手动掩码模式
+    function toggleMaskMode() {
+        const row = document.getElementById('mask-mode-row');
+        if (row.style.display === 'none') {
+            row.style.display = 'flex';
+        } else {
+            row.style.display = 'none';
+        }
+    }
+
+    function loadMyOrders() {
+        const tbody = document.getElementById('my-orders-body');
+        const countEl = document.getElementById('order-count');
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-2">加载中...</td></tr>';
+
+        fetch('/api/my_orders')
+            .then(res => {
+                if (res.status === 401) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-warning py-2">请先登录</td></tr>';
+                    return null;
+                }
+                return res.json();
+            })
+            .then(data => {
+                if (!data) return;
+                if (!data || data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-2">暂无购票记录，快去抢票吧 🎫</td></tr>';
+                    countEl.innerText = '';
+                    return;
+                }
+                countEl.innerText = `(共 ${data.length} 张)`;
+                let html = '';
+                data.forEach(o => {
+                    const isPaid = (o.order_status === 'PAID');
+                    const statusBadge = isPaid
+                        ? '<span class="badge bg-success">已支付</span>'
+                        : '<span class="badge bg-secondary">已退票</span>';
+                    const actionBtn = isPaid
+                        ? `<button class="btn btn-danger btn-sm" onclick="refundOrder('${o.order_id}')">退票</button>`
+                        : '<span class="text-muted small">已退票</span>';
+                    const route = (o.departure || '?') + ' → ' + (o.arrival || '?');
+                    const seatInfo = (o.carriage_no ? o.carriage_no + '车' : '') + (o.seat_no || '?');
+                    const timeStr = o.create_time ? o.create_time.replace('T', ' ') : '';
+
+                    html += `<tr>
+                        <td><code class="small">${o.order_id}</code></td>
+                        <td><strong>${o.train_id || ''}</strong></td>
+                        <td>${route}</td>
+                        <td>${seatInfo}</td>
+                        <td>¥${Number(o.price || 0).toFixed(2)}</td>
+                        <td>${statusBadge}</td>
+                        <td class="small text-muted">${timeStr}</td>
+                        <td>${actionBtn}</td>
+                    </tr>`;
+                });
+                tbody.innerHTML = html;
+            })
+            .catch(() => {
+                tbody.innerHTML = '<tr><td colspan="8" class="text-center text-danger py-2">网络请求失败</td></tr>';
+            });
+    }
+
+    function refundOrder(orderId) {
+        if (!confirm('确定要退掉订单 ' + orderId + ' 吗？\n退票后座位区间将自动释放。')) return;
+
+        fetch('/api/refund', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({order_id: orderId})
+        }).then(res => res.json()).then(data => {
+            if (data.ok) {
+                alert('✅ 退票成功！触发器已自动释放座位区间。');
+                loadMyOrders(); // 刷新订单列表
+                loadSeats();    // 刷新座位状态（让用户看到座位变回绿色）
+            } else {
+                alert('❌ 退票失败：' + (data.error || '未知错误'));
+            }
+        }).catch(err => {
+            alert('网络请求失败：' + err);
+        });
+    }
+
+    function refundTicket() {
+        const orderId = document.getElementById('refund-order').value;
+        fetch('/api/refund', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({order_id: orderId})
+        }).then(res => res.json()).then(d => {
+            if(d.ok) alert('✅ 触发器生效，退票成功，位图已释放！');
+            else alert('退票失败');
+        });
+    }
+
+    function loadFinancial() {
+        fetch('/api/financial').then(res => res.json()).then(d => {
+            document.getElementById('financial-display').innerText = JSON.stringify(d, null, 2);
+        });
+    }
+</script>
+</body>
 </html>

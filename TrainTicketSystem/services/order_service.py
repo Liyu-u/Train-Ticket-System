@@ -1,67 +1,88 @@
-import pymysql
+"""
+order_service.py
+
+核心购票服务：提供高并发安全的购票事务。
+
+技术要点（答辩用）：
+1. SELECT ... FOR UPDATE 获取目标座位行的排他锁（悲观锁）
+2. 按位与 (&) 检测区间冲突：`if (seat_bitmap & buy_mask) != 0` → 拒绝
+3. 按位或 (|) 更新占用位图：`new_bitmap = seat_bitmap | buy_mask`
+4. 同时写入 order_status='PAID' 和 status=1（双写，确保触发器与视图正常工作）
+5. 任何异常均回滚，保证库存与订单的一致性
+"""
 import uuid
+from utils.db_helper import get_connection
+
 
 def buy_ticket(user_id, train_id, carriage_no, seat_no, buy_mask):
-    """
-    核心购票事务：包含排他锁查票、位图防冲突验证、库存扣减与订单生成
-    """
-    # 1. 建立数据库连接（注意：必须关闭 autocommit，手动接管事务！）
-    conn = pymysql.connect(
-        host='127.0.0.1', 
-        user='root', 
-        password='135246', # 记得换成您的本地 MySQL 密码
-        database='ticket_system', 
-        autocommit=False
-    )
+    """在事务内完成一次高并发安全的购票请求。
 
+    参数：
+        user_id     -- 购票用户 ID
+        train_id    -- 车次编号（如 'G101'）
+        carriage_no -- 车厢号（整型）
+        seat_no     -- 座位号（如 '01A'）
+        buy_mask    -- 请求区间的二进制掩码（整型）
+
+    返回：
+        成功时返回订单号 (str)，失败时返回 None。
+    """
+    conn = get_connection(autocommit=False)
     try:
-        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-            print(f"[{user_id}] 正在锁定座位...")
-
-            # 2. 查询座位状态并加上排他锁 (FOR UPDATE)
-            sql_lock = """
-                SELECT seat_id, seat_bitmap
-                FROM seat_status
-                WHERE train_id = %s AND carriage_no = %s AND seat_no = %s
-                FOR UPDATE;
-            """
-            cursor.execute(sql_lock, (train_id, carriage_no, seat_no))
+        with conn.cursor() as cursor:
+            # 1) SELECT ... FOR UPDATE：锁定目标座位行，阻止并发写入
+            cursor.execute(
+                """SELECT seat_id, seat_bitmap
+                   FROM seat_status
+                   WHERE train_id = %s AND carriage_no = %s AND seat_no = %s
+                   FOR UPDATE""",
+                (train_id, carriage_no, seat_no)
+            )
             seat = cursor.fetchone()
 
             if not seat:
-                print(f"[{user_id}] ❌ 购票失败：未找到该座位。")
-                return False
-
-            # 3. 位图冲突检测（判断目标区间是否被占用）
-            # 按位与运算：如果当前状态与请求掩码按位与结果不为 0，说明发生区间重叠
-            if (seat['seat_bitmap'] & buy_mask) != 0:
-                print(f"[{user_id}] ❌ 购票失败：该区间的车票已被抢走！")
                 conn.rollback()
-                return False
+                print(f"[{user_id}] 购票失败：未找到座位 {train_id} {carriage_no}-{seat_no}")
+                return None
 
-            # 4. 扣减库存（通过按位或运算，锁定新区间）
-            new_bitmap = seat['seat_bitmap'] | buy_mask
-            sql_update = "UPDATE seat_status SET seat_bitmap = %s WHERE seat_id = %s"
-            cursor.execute(sql_update, (new_bitmap, seat['seat_id']))
+            seat_id = seat[0]
+            current_bitmap = seat[1] or 0
 
-            # 5. 生成订单记录
-            order_id = "ORD" + str(uuid.uuid4().hex)[:8].upper()
-            sql_order = """
-                INSERT INTO orders (order_id, user_id, train_id, seat_id, buy_mask)
-                VALUES (%s, %s, %s, %s, %s)
-            """
-            cursor.execute(sql_order, (order_id, user_id, train_id, seat['seat_id'], buy_mask))
+            # 2) 按位与冲突检测：任何一位重叠即拒绝
+            if (current_bitmap & buy_mask) != 0:
+                conn.rollback()
+                print(f"[{user_id}] 购票失败：区间冲突（seat_id={seat_id}，"
+                      f"当前位图={bin(current_bitmap)}，请求掩码={bin(buy_mask)}）")
+                return None
 
-            # 6. 一切顺利，提交事务，释放行锁！
+            # 3) 无冲突 → 按位或更新位图
+            new_bitmap = current_bitmap | buy_mask
+            cursor.execute(
+                "UPDATE seat_status SET seat_bitmap = %s WHERE seat_id = %s",
+                (new_bitmap, seat_id)
+            )
+
+            # 4) 生成订单（双写 order_status + status）
+            order_id = 'ORD' + uuid.uuid4().hex[:10].upper()
+            cursor.execute(
+                """INSERT INTO orders
+                   (order_id, user_id, train_id, seat_id, buy_mask, order_status, status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (order_id, user_id, train_id, seat_id, buy_mask, 'PAID', 1)
+            )
+
+            # 5) 提交事务，释放行锁
             conn.commit()
-            print(f"[{user_id}] ✅ 购票成功！订单号: {order_id}，已锁定区间: {buy_mask}")
-            # ================== 核心炫技点结束 ==================
-            return True
+            print(f"[{user_id}] 购票成功，订单号: {order_id}，"
+                  f"已锁定位图: {bin(buy_mask)}")
+            return order_id
 
     except Exception as e:
-        # 发生任何异常，立刻回滚撤销，保证订单和库存绝对不乱
-        conn.rollback()
-        print(f"[{user_id}] ⚠️ 系统异常，事务已回滚: {e}")
-        return False
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[{user_id}] 系统异常，事务已回滚：{e}")
+        return None
     finally:
         conn.close()

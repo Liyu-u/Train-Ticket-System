@@ -27,13 +27,27 @@ DB_PASSWORD = os.getenv('DB_PASSWORD', '')
 DB_NAME = os.getenv('DB_NAME', 'train_ticket')
 
 def get_db_config():
-		"""返回用于 `pymysql.connect` 的数据库参数字典。"""
-		return {
-				'host': DB_HOST,
-				'port': DB_PORT,
-				'user': DB_USER,
-				'password': DB_PASSWORD,
-				'database': DB_NAME,
-				'autocommit': False,
-		}
+    """返回用于 `pymysql.connect` 的数据库参数字典。"""
+    return {
+        'host': DB_HOST,
+        'port': DB_PORT,
+        'user': DB_USER,
+        'password': DB_PASSWORD,
+        'database': DB_NAME,
+        'autocommit': False,
+    }
 
+
+def get_connection(autocommit=False):
+    """返回一个使用环境变量配置的 pymysql 连接。
+
+    这是全项目唯一的数据库连接工厂函数。所有模块应从此处获取连接，
+    避免在各处重复实现 get_db_conn() / get_conn()。
+
+    参数：
+        autocommit -- 默认 False（由调用方显式管理事务边界）。
+    """
+    import pymysql
+    cfg = get_db_config()
+    cfg['autocommit'] = autocommit
+    return pymysql.connect(**cfg)

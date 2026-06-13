@@ -1,22 +1,24 @@
-import os
+"""
+dump_latest_order.py
+
+导出最近一笔订单的全部字段，用于调试。
+"""
+from utils.db_helper import get_connection
 import pymysql
 
-def get_conn():
-    host = os.getenv('DB_HOST', '127.0.0.1')
-    user = os.getenv('DB_USER', 'root')
-    password = os.getenv('DB_PASSWORD', '')
-    db = os.getenv('DB_NAME', 'train_ticket')
-    return pymysql.connect(host=host, user=user, password=password, database=db, autocommit=True)
 
 def dump():
-    conn = get_conn()
+    conn = get_connection(autocommit=True)
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-            cursor.execute('SELECT * FROM orders ORDER BY create_time DESC LIMIT 1')
+            cursor.execute(
+                'SELECT * FROM orders ORDER BY create_time DESC LIMIT 1'
+            )
             o = cursor.fetchone()
             print('Latest order:', o)
     finally:
         conn.close()
+
 
 if __name__ == '__main__':
     dump()
