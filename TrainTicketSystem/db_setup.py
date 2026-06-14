@@ -135,12 +135,22 @@ def ensure_tables():
                     user_id     VARCHAR(64)   NOT NULL                COMMENT '操作人 ID',
                     action_type VARCHAR(10)   NOT NULL                COMMENT '动作类型：PAY / REFUND',
                     amount      DECIMAL(10,2) NOT NULL                COMMENT '金额变动（正数）',
+                    snapshot_bitmap INT        DEFAULT 0              COMMENT '触发时刻的 buy_mask 快照（审计留痕）',
                     create_time TIMESTAMP     DEFAULT CURRENT_TIMESTAMP COMMENT '流水创建时间',
                     INDEX idx_order (order_id),
                     INDEX idx_user  (user_id),
                     INDEX idx_time  (create_time)
                 ) ENGINE=InnoDB COMMENT='金融级流水账本（审计追踪）';
             ''')
+            # V3.3 兼容旧表：若缺少 snapshot_bitmap 列，自动补齐
+            try:
+                cursor.execute(
+                    """ALTER TABLE transaction_logs
+                       ADD COLUMN snapshot_bitmap INT DEFAULT 0
+                       COMMENT '触发时刻的 buy_mask 快照（审计留痕）'"""
+                )
+            except Exception:
+                pass  # 列已存在则忽略
 
             # ---- 财务核算视图 (View) ----
             cursor.execute('''
@@ -161,7 +171,37 @@ def ensure_tables():
                 LEFT JOIN orders o ON t.train_id = o.train_id
                 GROUP BY t.train_id;
             ''')
-        print('[ensure_tables] 8 张表 + 1 个财务视图已就绪 (V3.2 金融级流水账本)')
+            print('[ensure_tables] 8 张表 + 1 个财务视图已就绪 (V3.3 触发器引擎)')
+
+            # ---- 注入金融级防篡改触发器 (Triggers) ----
+            # 触发器 1：拦截购票动作 (AFTER INSERT)
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS trg_after_order_insert
+                AFTER INSERT ON orders
+                FOR EACH ROW
+                BEGIN
+                    -- 只要新订单的状态是 1 (已支付)，立刻底层自动记账
+                    IF NEW.status = 1 THEN
+                        INSERT INTO transaction_logs (order_id, user_id, action_type, amount, snapshot_bitmap)
+                        VALUES (NEW.order_id, NEW.user_id, 'PAY', NEW.price, NEW.buy_mask);
+                    END IF;
+                END;
+            ''')
+
+            # 触发器 2：拦截退票动作 (AFTER UPDATE)
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS trg_after_order_update
+                AFTER UPDATE ON orders
+                FOR EACH ROW
+                BEGIN
+                    -- 只有当状态被从 1 (已支付) 改为 2 (已退票) 时，才触发退款记账
+                    IF OLD.status = 1 AND NEW.status = 2 THEN
+                        INSERT INTO transaction_logs (order_id, user_id, action_type, amount, snapshot_bitmap)
+                        VALUES (NEW.order_id, NEW.user_id, 'REFUND', NEW.price, NEW.buy_mask);
+                    END IF;
+                END;
+            ''')
+            print('[ensure_tables] 数据库底层防篡改触发器 (Triggers) 已挂载完毕！')
     finally:
         conn.close()
 
@@ -325,6 +365,8 @@ def reset_all_data():
         with conn.cursor() as cursor:
             cursor.execute('DROP TABLE IF EXISTS orders')
             cursor.execute('DROP TABLE IF EXISTS transaction_logs')
+            cursor.execute('DROP TRIGGER IF EXISTS trg_after_order_insert')
+            cursor.execute('DROP TRIGGER IF EXISTS trg_after_order_update')
             cursor.execute('DROP TABLE IF EXISTS seat_status')
             cursor.execute('DROP TABLE IF EXISTS train_stops')
             cursor.execute('DROP TABLE IF EXISTS train_info')

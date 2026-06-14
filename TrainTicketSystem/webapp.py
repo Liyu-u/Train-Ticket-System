@@ -667,15 +667,7 @@ def api_buy():
                 (order_id, user_id, train_id, seat_id, buy_mask, actual_price)
             )
 
-            # ── 5b. 写入金融级流水账本（审计追踪） ──
-            cursor.execute(
-                """INSERT INTO transaction_logs
-                   (order_id, user_id, action_type, amount)
-                   VALUES (%s, %s, 'PAY', %s)""",
-                (order_id, user_id, actual_price)
-            )
-
-            # ── 6. 提交事务 ──
+            # ── 6. 提交事务（触发器 trg_after_order_insert 自动记账） ──
             conn.commit()
 
             resp = {
@@ -739,7 +731,7 @@ def api_refund():
             #         带 order_status='PAID' 防重复退票
             # ════════════════════════════════════════════════════
             cursor.execute(
-                """SELECT user_id, seat_id, buy_mask, price
+                """SELECT user_id, seat_id, buy_mask
                    FROM orders
                    WHERE order_id = %s AND order_status = 'PAID'
                    FOR UPDATE""",
@@ -751,7 +743,7 @@ def api_refund():
                 conn.rollback()
                 return jsonify({'error': '订单不存在或已退票'}), 404
 
-            owner_id, seat_id, buy_mask, refund_price = row
+            owner_id, seat_id, buy_mask = row
 
             # ════════════════════════════════════════════════════
             # 步骤 3：数据完整性 + 权限校验
@@ -800,12 +792,7 @@ def api_refund():
                 return jsonify({'error': '退票失败：座位记录丢失，无法释放库存'}), 500
 
             # 写入金融级流水账本（审计追踪）
-            cursor.execute(
-                """INSERT INTO transaction_logs
-                   (order_id, user_id, action_type, amount)
-                   VALUES (%s, %s, 'REFUND', %s)""",
-                (order_id, owner_id, refund_price)
-            )
+            # 提交事务（触发器 trg_after_order_update 自动记账）
 
             # ════════════════════════════════════════════════════
             # 步骤 6：提交事务
