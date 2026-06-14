@@ -7,22 +7,32 @@ from utils.db_helper import get_connection
 
 
 def query_trains():
-    """返回所有车次信息列表。
+    """返回所有车次信息列表（V3.1: 计价熔断 — 管理员自定义 > 前缀自动定价）。
 
     返回字段：
-        train_id, train_no, departure, arrival, departure_time, price, total_seats
+        train_id, train_no, departure, arrival, departure_time, total_seats, base_rate
 
-    返回：
-        list[dict] — 按 train_id 升序排列的车次列表。
+    base_rate 取值逻辑（与 /api/buy 完全一致）：
+        COALESCE(NULLIF(t.price, 0), tm.base_rate, 100.00)
+          → t.price > 0 ？用管理员自定义价
+          → t.price = 0 ？用 train_models 前缀自动定价
+          → 都没有      ？兜底 100.00
     """
     conn = get_connection(autocommit=True)
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                """SELECT train_id, train_no, departure, arrival,
-                          departure_time, price, total_seats
-                   FROM train_info
-                   ORDER BY train_id"""
+                """SELECT
+                       t.train_id,
+                       t.train_no,
+                       t.departure,
+                       t.arrival,
+                       t.departure_time,
+                       t.total_seats,
+                       COALESCE(NULLIF(t.price, 0), tm.base_rate, 100.00) AS base_rate
+                   FROM train_info t
+                   LEFT JOIN train_models tm ON tm.type_code = LEFT(t.train_id, 1)
+                   ORDER BY t.train_id"""
             )
             rows = cursor.fetchall()
             cols = [d[0] for d in cursor.description]
@@ -32,22 +42,38 @@ def query_trains():
 
 
 def query_seats(train_id):
-    """查询指定车次的所有座位及当前位图状态。
+    """查询指定车次的所有座位及 V3.1 动态计价信息（含管理员自定义定价熔断）。
 
     参数：
         train_id -- 车次编号（如 'G101'）
 
     返回：
-        list[dict] — 包含 seat_id, carriage_no, seat_no, seat_bitmap, default_mask。
+        list[dict] — 包含 seat_id, carriage_no, seat_no, seat_bitmap, default_mask,
+                     class_code, class_name, price_multiplier, base_rate。
+
+    base_rate 取值逻辑（与 /api/buy、/api/query_routes 完全一致）：
+        COALESCE(NULLIF(ti.price, 0), tm.base_rate, 100.00)
     """
     conn = get_connection(autocommit=True)
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                """SELECT seat_id, carriage_no, seat_no, seat_bitmap, default_mask
-                   FROM seat_status
-                   WHERE train_id = %s
-                   ORDER BY carriage_no, seat_no""",
+                """SELECT
+                       s.seat_id,
+                       s.carriage_no,
+                       s.seat_no,
+                       s.seat_bitmap,
+                       s.default_mask,
+                       s.class_code,
+                       COALESCE(sc.class_name, '二等座')       AS class_name,
+                       COALESCE(sc.price_multiplier, 1.0)      AS price_multiplier,
+                       COALESCE(NULLIF(ti.price, 0), tm.base_rate, 100.00) AS base_rate
+                   FROM seat_status s
+                   LEFT JOIN seat_classes sc ON s.class_code = sc.class_code
+                   JOIN train_info ti ON ti.train_id = s.train_id
+                   LEFT JOIN train_models tm ON tm.type_code = LEFT(ti.train_id, 1)
+                   WHERE s.train_id = %s
+                   ORDER BY s.carriage_no, s.seat_no""",
                 (train_id,)
             )
             rows = cursor.fetchall()

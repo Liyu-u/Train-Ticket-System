@@ -1,24 +1,53 @@
 """
-db_setup.py
+db_setup.py  (V3.0 动态计价引擎)
 
-数据库预置脚本（幂等）：
-- 创建所有表（如果不存在），结构与 01_init_db.sql 完全一致
-- 插入示例车次 G101, G102, G103
-- 为每个车次插入 5 个示例座位（1-01A, 1-01B, 1-02A, 1-02B, 1-03A）
-- 为每个座位写入默认掩码（default_mask）: 0b00001, 0b00010, 0b00100, 0b01000, 0b10000
-- 初始化 seat_bitmap = 0
+数据库预置脚本 — 固定测试集，一键就绪。
 
-同时包含 `reset_all_data()` 用于一键重置样例数据（CLI 支持 `--reset`）。
+特性：
+- 创建全部 7 张表 + 1 个财务视图（幂等）
+- 包含 train_models（车型费率）与 seat_classes（席别倍率）字典表
+- 事务内批量写入：G101 车次 + 3 种车型 + 3 种席别 + 4 经停站 + 25 个分级座位 + 2 个用户
+- 座位分级：第1排 SWZ(商务3.0×) | 第2排 YDZ(一等1.6×) | 3-5排 EDZ(二等1.0×)
+- 支持 --reset 一键 DROP 重建
+
+用法：
+    python db_setup.py              # 幂等初始化（已有数据则跳过）
+    python db_setup.py --reset      # 强制重建（DROP + CREATE + INSERT）
 """
 import argparse
+import hashlib
+import secrets
+
 from utils.db_helper import get_connection
 
 
+# =========================================================================
+# 建表 DDL（与 sql_scripts/01_init_db.sql 完全一致）
+# =========================================================================
+
 def ensure_tables():
-    """创建所有表（幂等），DDL 与 sql_scripts/01_init_db.sql 保持一致。"""
+    """创建全部 5 张表（幂等）。"""
     conn = get_connection(autocommit=True)
     try:
         with conn.cursor() as cursor:
+            # ---- train_models（V3.0 动态计价：车型基准费率） ----
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS train_models (
+                    type_code   VARCHAR(10)   PRIMARY KEY   COMMENT '车型代码，如 G/D/K',
+                    type_name   VARCHAR(50)   NOT NULL      COMMENT '车型名称，如 高铁/动车/普快',
+                    base_rate   DECIMAL(10,2) NOT NULL      COMMENT '基准费率（元/站）'
+                ) ENGINE=InnoDB COMMENT='车型基准费率表（动态计价引擎核心）';
+            ''')
+
+            # ---- seat_classes（V3.0 动态计价：座位等级倍率） ----
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS seat_classes (
+                    class_code       VARCHAR(10)   PRIMARY KEY   COMMENT '席别代码，如 SWZ/YDZ/EDZ',
+                    class_name       VARCHAR(50)   NOT NULL      COMMENT '席别名称，如 商务座/一等座/二等座',
+                    price_multiplier DECIMAL(4,2)  NOT NULL      COMMENT '价格倍率'
+                ) ENGINE=InnoDB COMMENT='座位等级倍率表（动态计价引擎核心）';
+            ''')
+
             # ---- train_info ----
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS train_info (
@@ -39,11 +68,21 @@ def ensure_tables():
                     train_id      VARCHAR(20)  NOT NULL           COMMENT '所属车次编号',
                     carriage_no   INT          NOT NULL           COMMENT '车厢号',
                     seat_no       VARCHAR(10)  NOT NULL           COMMENT '座位号，如 01A',
+                    class_code    VARCHAR(10)  DEFAULT 'EDZ'      COMMENT '席别代码 → seat_classes.class_code',
                     seat_bitmap   INT          DEFAULT 0          COMMENT '二进制区间占用状态：0=全空闲',
                     default_mask  INT          DEFAULT 0          COMMENT '该座位的默认区间掩码',
                     UNIQUE KEY uk_train_seat (train_id, carriage_no, seat_no)
                 ) ENGINE=InnoDB COMMENT='高并发座位区间状态表（位图模型核心）';
             ''')
+            # V3.0 兼容旧表：若 seat_status 已存在但缺少 class_code 列，自动补齐
+            try:
+                cursor.execute(
+                    """ALTER TABLE seat_status
+                       ADD COLUMN class_code VARCHAR(10) DEFAULT 'EDZ'
+                       COMMENT '席别代码 → seat_classes.class_code'"""
+                )
+            except Exception:
+                pass  # 列已存在则忽略
 
             # ---- orders ----
             cursor.execute('''
@@ -55,7 +94,7 @@ def ensure_tables():
                     buy_mask     INT           DEFAULT 0              COMMENT '本次购买的区间掩码',
                     price        DECIMAL(10,2) DEFAULT 0              COMMENT '订单金额',
                     order_status VARCHAR(20)   DEFAULT 'PAID'         COMMENT '字符串状态：PAID / REFUNDED',
-                    status       INT           DEFAULT 1              COMMENT '数值状态：1=已支付, 2=已退票（触发器与视图使用此字段）',
+                    status       INT           DEFAULT 1              COMMENT '数值状态：1=已支付, 2=已退票',
                     create_time  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP COMMENT '订单创建时间'
                 ) ENGINE=InnoDB COMMENT='交易订单表';
             ''')
@@ -74,7 +113,7 @@ def ensure_tables():
                     CONSTRAINT fk_stops_train
                         FOREIGN KEY (train_id) REFERENCES train_info(train_id)
                         ON DELETE CASCADE ON UPDATE CASCADE
-                ) ENGINE=InnoDB COMMENT='列车停靠站表（动态路由核心 —— stop_index 对应位图偏移量）';
+                ) ENGINE=InnoDB COMMENT='列车停靠站表（动态路由核心 — stop_index 对应位图偏移量）';
             ''')
 
             # ---- users ----
@@ -87,191 +126,238 @@ def ensure_tables():
                     create_time TIMESTAMP    DEFAULT CURRENT_TIMESTAMP COMMENT '注册时间'
                 ) ENGINE=InnoDB COMMENT='全局用户与权限表';
             ''')
+
+            # ---- transaction_logs（金融级流水账本） ----
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS transaction_logs (
+                    log_id      BIGINT AUTO_INCREMENT PRIMARY KEY     COMMENT '流水主键',
+                    order_id    VARCHAR(64)   NOT NULL                COMMENT '关联订单号',
+                    user_id     VARCHAR(64)   NOT NULL                COMMENT '操作人 ID',
+                    action_type VARCHAR(10)   NOT NULL                COMMENT '动作类型：PAY / REFUND',
+                    amount      DECIMAL(10,2) NOT NULL                COMMENT '金额变动（正数）',
+                    create_time TIMESTAMP     DEFAULT CURRENT_TIMESTAMP COMMENT '流水创建时间',
+                    INDEX idx_order (order_id),
+                    INDEX idx_user  (user_id),
+                    INDEX idx_time  (create_time)
+                ) ENGINE=InnoDB COMMENT='金融级流水账本（审计追踪）';
+            ''')
+
+            # ---- 财务核算视图 (View) ----
+            cursor.execute('''
+                CREATE OR REPLACE VIEW v_daily_financial_report AS
+                SELECT
+                    t.train_id,
+                    CURDATE() AS sale_date,
+                    COUNT(o.order_id) AS total_orders,
+                    SUM(CASE WHEN o.status = 1 THEN 1 ELSE 0 END) AS paid_orders,
+                    SUM(CASE WHEN o.status = 2 THEN 1 ELSE 0 END) AS refunded_orders,
+                    COALESCE(SUM(CASE WHEN o.status = 1 THEN o.price ELSE 0 END), 0) AS total_sales,
+                    COALESCE(SUM(CASE WHEN o.status = 2 THEN o.price ELSE 0 END), 0) AS refund_amount,
+                    COALESCE(SUM(CASE WHEN o.status = 1 THEN o.price ELSE 0 END), 0) AS net_revenue
+                FROM train_info t
+                LEFT JOIN orders o ON t.train_id = o.train_id
+                GROUP BY t.train_id;
+            ''')
+        print('[ensure_tables] 8 张表 + 1 个财务视图已就绪 (V3.2 金融级流水账本)')
     finally:
         conn.close()
 
 
-def insert_train_if_not_exists(train_id, train_no, departure, arrival,
-                               departure_time, price, total_seats=100):
-    """幂等插入车次信息。若已存在则跳过。"""
-    conn = get_connection(autocommit=True)
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                'SELECT 1 FROM train_info WHERE train_id = %s LIMIT 1',
-                (train_id,)
-            )
-            if not cursor.fetchone():
-                cursor.execute(
-                    """INSERT INTO train_info
-                       (train_id, train_no, departure, arrival,
-                        departure_time, price, total_seats)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (train_id, train_no, departure, arrival,
-                     departure_time, price, total_seats)
-                )
-                print(f'已插入车次 {train_id}')
-            else:
-                print(f'车次 {train_id} 已存在，跳过创建')
-    finally:
-        conn.close()
+# =========================================================================
+# 密码哈希工具
+# =========================================================================
+
+def _hash_password(pwd: str) -> str:
+    """PBKDF2-SHA256 + 随机盐，格式 salt$hex_digest。"""
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac('sha256', pwd.encode(), salt.encode(), 100000)
+    return f'{salt}${dk.hex()}'
 
 
-def insert_seat_if_not_exists(train_id, carriage_no, seat_no, default_mask=0):
-    """幂等插入座位。若已存在则重置 seat_bitmap=0 并更新 default_mask。"""
-    conn = get_connection(autocommit=True)
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """SELECT seat_id FROM seat_status
-                   WHERE train_id = %s AND carriage_no = %s AND seat_no = %s""",
-                (train_id, carriage_no, seat_no)
-            )
-            if not cursor.fetchone():
-                cursor.execute(
-                    """INSERT INTO seat_status
-                       (train_id, carriage_no, seat_no, seat_bitmap, default_mask)
-                       VALUES (%s, %s, %s, 0, %s)""",
-                    (train_id, carriage_no, seat_no, default_mask)
-                )
-                print(f'已插入座位 {train_id} {carriage_no} {seat_no} '
-                      f'mask={bin(default_mask)}')
-            else:
-                cursor.execute(
-                    """UPDATE seat_status SET seat_bitmap = 0, default_mask = %s
-                       WHERE train_id = %s AND carriage_no = %s AND seat_no = %s""",
-                    (default_mask, train_id, carriage_no, seat_no)
-                )
-                print(f'座位 {train_id} {carriage_no} {seat_no} 已存在，'
-                      f'已重置 seat_bitmap=0 并设置 default_mask={bin(default_mask)}')
-    finally:
-        conn.close()
-
+# =========================================================================
+# 核心：事务内写入固定测试集
+# =========================================================================
 
 def populate_sample_data():
-    """插入示例车次与座位数据，同时插入示例用户（使用哈希密码）。"""
-    # ---- 车次 ----
-    trains = [
-        ('G101', 'G101', '北京南',   '上海虹桥', '2026-07-01 08:00:00', 300.00),
-        ('G102', 'G102', '上海虹桥', '北京南',   '2026-07-01 13:00:00', 300.00),
-        ('G103', 'G103', '北京南',   '杭州东',   '2026-07-01 09:00:00', 180.00),
-    ]
+    """在单次事务内批量写入 G101 全套测试数据 (V3.0 动态计价)。
 
-    seats = ['01A', '01B', '02A', '02B', '03A']
-    masks = [0b00001, 0b00010, 0b00100, 0b01000, 0b10000]
+    写入内容：
+        1a. G101 车次信息（北京南 → 上海虹桥）
+        1b. 3 种车型费率（G高铁100/站, D动车60/站, K普快20/站）
+        1c. 3 种席别倍率（SWZ商务3.0×, YDZ一等1.6×, EDZ二等1.0×）
+        2.  4 个固定经停站（executemany + INSERT IGNORE）
+        3.  25 个分级座位（row1→SWZ, row2→YDZ, row3-5→EDZ）
+        4.  2 个用户（admin / zhangsan，密码 123456）
 
-    for t in trains:
-        insert_train_if_not_exists(t[0], t[1], t[2], t[3], t[4], t[5])
-        for seat_no, mask in zip(seats, masks):
-            insert_seat_if_not_exists(t[0], 1, seat_no, mask)
-
-    # ---- 示例用户（密码均为 123456，使用 PBKDF2-SHA256 哈希存储） ----
-    _seed_users()
-
-    # ---- 示例停靠站（G101 经停 4 站） ----
-    _seed_train_stops()
-
-
-def _seed_users():
-    """幂等插入示例用户（密码使用 PBKDF2-SHA256 哈希存储）。"""
-    import hashlib
-    import secrets
-
-    def _hash(pwd: str) -> str:
-        salt = secrets.token_hex(16)
-        dk = hashlib.pbkdf2_hmac('sha256', pwd.encode(), salt.encode(), 100000)
-        return f'{salt}${dk.hex()}'
-
-    users = [
-        ('U_ADMIN_001', 'admin',    '123456', 'ADMIN'),
-        ('U_PASS_001',  'zhangsan', '123456', 'USER'),
-    ]
-
-    conn = get_connection(autocommit=True)
+    所有 INSERT 均使用 IGNORE / ON DUPLICATE KEY UPDATE 保证幂等。
+    任一环节失败则整体 rollback。
+    """
+    conn = get_connection(autocommit=False)
     try:
+        conn.begin()
         with conn.cursor() as cursor:
-            for uid, uname, pwd, role in users:
-                cursor.execute(
-                    'SELECT 1 FROM users WHERE user_id = %s LIMIT 1', (uid,)
-                )
-                if not cursor.fetchone():
-                    hashed = _hash(pwd)
-                    cursor.execute(
-                        """INSERT INTO users (user_id, username, password, role_type)
-                           VALUES (%s, %s, %s, %s)""",
-                        (uid, uname, hashed, role)
-                    )
-                    print(f'已插入用户 {uname} (role={role})')
+
+            # ──── 1. 写入 G101 车次（幂等） ────
+            cursor.execute(
+                """INSERT INTO train_info
+                   (train_id, train_no, departure, arrival,
+                    departure_time, price, total_seats)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE
+                     train_no       = VALUES(train_no),
+                     departure      = VALUES(departure),
+                     arrival        = VALUES(arrival),
+                     departure_time = VALUES(departure_time),
+                     price          = VALUES(price)""",
+                ('G101', 'G101', '北京南', '上海虹桥',
+                 '2026-07-01 08:00:00', 300.00, 100)
+            )
+            print('[1/6] G101 车次已写入')
+
+            # ──── 1b. 写入车型基准费率字典数据 ────
+            train_models_data = [
+                ('G', '高铁', 100.00),
+                ('D', '动车',  60.00),
+                ('K', '普快',  20.00),
+            ]
+            cursor.executemany(
+                """INSERT IGNORE INTO train_models (type_code, type_name, base_rate)
+                   VALUES (%s, %s, %s)""",
+                train_models_data
+            )
+            print(f'[2/6] {len(train_models_data)} 种车型费率已写入')
+
+            # ──── 1c. 写入座位等级倍率字典数据 ────
+            seat_classes_data = [
+                ('SWZ', '商务座', 3.0),
+                ('YDZ', '一等座', 1.6),
+                ('EDZ', '二等座', 1.0),
+            ]
+            cursor.executemany(
+                """INSERT IGNORE INTO seat_classes (class_code, class_name, price_multiplier)
+                   VALUES (%s, %s, %s)""",
+                seat_classes_data
+            )
+            print(f'[3/6] {len(seat_classes_data)} 种席别倍率已写入')
+
+            # ──── 2. 批量写入 G101 的 4 个固定经停站 ────
+            stops = [
+                ('G101', '北京南',   0, None,                      '2026-07-01 08:00:00'),
+                ('G101', '济南西',   1, '2026-07-01 10:30:00',    '2026-07-01 10:35:00'),
+                ('G101', '南京南',   2, '2026-07-01 13:00:00',    '2026-07-01 13:05:00'),
+                ('G101', '上海虹桥', 3, '2026-07-01 15:00:00',     None),
+            ]
+            cursor.executemany(
+                """INSERT IGNORE INTO train_stops
+                   (train_id, station_name, stop_index, arrival_time, departure_time)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                stops
+            )
+            print(f'[4/6] {len(stops)} 个经停站已写入 (stop_index 0→3)')
+
+            # ──── 3. 动态生成 G101 的 25 个真实座位（3+2 布局，V3.0 分等级） ────
+            seat_data = []
+            for row in range(1, 6):                              # 排号 1~5
+                # V3.0 等级判定：第1排商务座，第2排一等座，3-5排二等座
+                if row == 1:
+                    class_code = 'SWZ'   # 商务座 (3.0×)
+                elif row == 2:
+                    class_code = 'YDZ'   # 一等座 (1.6×)
                 else:
-                    print(f'用户 {uname} 已存在，跳过创建')
+                    class_code = 'EDZ'   # 二等座 (1.0×)
+
+                for col in ['A', 'B', 'C', 'D', 'F']:            # 列名 A/B/C/D/F
+                    seat_no = f"{row:02d}{col}"                   # → 01A ~ 05F
+                    seat_data.append(('G101', 1, seat_no, class_code, 0, 0))
+
+            cursor.executemany(
+                """INSERT INTO seat_status
+                   (train_id, carriage_no, seat_no, class_code, seat_bitmap, default_mask)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE
+                     class_code = VALUES(class_code),
+                     seat_bitmap = 0, default_mask = 0""",
+                seat_data
+            )
+            print(f'[5/6] {len(seat_data)} 个座位已写入 (01A~05F, SWZ×5 + YDZ×5 + EDZ×15)')
+
+            # ──── 4. 写入 2 个用户（密码均为 123456） ────
+            users = [
+                ('U_ADMIN_001', 'admin',    _hash_password('123456'), 'ADMIN'),
+                ('U_PASS_001',  'zhangsan', _hash_password('123456'), 'USER'),
+            ]
+            cursor.executemany(
+                """INSERT IGNORE INTO users
+                   (user_id, username, password, role_type)
+                   VALUES (%s, %s, %s, %s)""",
+                users
+            )
+            print(f'[6/6] {len(users)} 个用户已写入 (admin / zhangsan)')
+
+            # ──── 提交 ────
+            conn.commit()
+            total_seats = len(seat_data)
+            print(f'[populate] 事务提交成功 — '
+                  f'G101 车次 + {len(stops)} 站 + {total_seats} 座 + {len(users)} 用户')
+
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f'[populate] 事务回滚: {e}')
+        raise
     finally:
         conn.close()
 
 
-def _seed_train_stops():
-    """幂等插入 G101 停靠站数据（4 站 → 3 个运行区间）。"""
-    stops = [
-        ('G101', '北京南',   0, None,                      '2026-07-01 08:00:00'),
-        ('G101', '济南西',   1, '2026-07-01 10:30:00',    '2026-07-01 10:35:00'),
-        ('G101', '南京南',   2, '2026-07-01 13:00:00',    '2026-07-01 13:05:00'),
-        ('G101', '上海虹桥', 3, '2026-07-01 15:00:00',     None),
-    ]
-
-    conn = get_connection(autocommit=True)
-    try:
-        with conn.cursor() as cursor:
-            for train_id, station_name, stop_index, arr, dep in stops:
-                cursor.execute(
-                    """SELECT 1 FROM train_stops
-                       WHERE train_id = %s AND stop_index = %s LIMIT 1""",
-                    (train_id, stop_index)
-                )
-                if not cursor.fetchone():
-                    cursor.execute(
-                        """INSERT INTO train_stops
-                           (train_id, station_name, stop_index, arrival_time, departure_time)
-                           VALUES (%s, %s, %s, %s, %s)""",
-                        (train_id, station_name, stop_index, arr, dep)
-                    )
-                    print(f'已插入停靠站 {train_id} [{stop_index}] {station_name}')
-                else:
-                    print(f'停靠站 {train_id} [{stop_index}] {station_name} 已存在，跳过')
-    finally:
-        conn.close()
-
+# =========================================================================
+# 一键重置
+# =========================================================================
 
 def reset_all_data():
-    """彻底重建示例数据（DROP 旧表并重建）。"""
+    """DROP 全部 5 张表 → 重建 DDL → 写入测试集。"""
     conn = get_connection(autocommit=True)
     try:
         with conn.cursor() as cursor:
             cursor.execute('DROP TABLE IF EXISTS orders')
+            cursor.execute('DROP TABLE IF EXISTS transaction_logs')
             cursor.execute('DROP TABLE IF EXISTS seat_status')
             cursor.execute('DROP TABLE IF EXISTS train_stops')
             cursor.execute('DROP TABLE IF EXISTS train_info')
+            cursor.execute('DROP TABLE IF EXISTS train_models')
+            cursor.execute('DROP TABLE IF EXISTS seat_classes')
             cursor.execute('DROP TABLE IF EXISTS users')
-        print('已 DROP orders, seat_status, train_stops, train_info, users 表（重建中）')
+        print('[reset] 已 DROP 全部 8 张表')
     finally:
         conn.close()
 
     ensure_tables()
     populate_sample_data()
+    print('[reset] 重建完成 — G101 固定测试集已就绪')
 
 
 def ensure_sample_data():
-    """幂等初始化：建表 + 插入示例数据。"""
+    """幂等初始化：建表 + 写入测试集。"""
     ensure_tables()
     populate_sample_data()
 
 
+# =========================================================================
+# CLI 入口
+# =========================================================================
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='DB setup for TrainTicketSystem')
-    parser.add_argument('--reset', action='store_true',
-                        help='Reset all sample data (delete and re-create)')
+    parser = argparse.ArgumentParser(
+        description='TrainTicketSystem — 数据库初始化与重置脚本'
+    )
+    parser.add_argument(
+        '--reset', action='store_true',
+        help='强制 DROP 全部表后重建（数据将丢失）'
+    )
     args = parser.parse_args()
 
     if args.reset:
-        ensure_tables()
         reset_all_data()
     else:
         ensure_sample_data()

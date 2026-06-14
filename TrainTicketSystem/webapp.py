@@ -1,5 +1,7 @@
 import hashlib
 import secrets
+import uuid
+from decimal import Decimal
 
 from flask import Flask, request, jsonify, render_template, session
 
@@ -7,7 +9,6 @@ app = Flask(__name__)
 app.secret_key = 'any_secret_string_you_like'
 
 from utils.db_helper import get_connection
-from services.order_service import buy_ticket
 from services.ticket_service import query_seats, query_trains
 
 
@@ -103,24 +104,27 @@ def api_trains():
 
 @app.route('/api/add_train', methods=['POST'])
 def api_add_train():
-    """管理员接口：发布新车次（事务性写入车次 + 经停站 + 默认座位）。
+    """管理员接口：发布新车次（V3.1 — 支持自定义定价覆盖 + 事务写入）。
 
     请求体（JSON）：
         train_id      -- 车次编号（必填）
-        price         -- 票价
+        custom_price  -- 自定义基准价 元/站（选填，0 或留空则按 G/D/K 前缀自动定价）
         departure_time-- 首发时间 (datetime string)
         stops         -- 经停站数组 [
             {"station_name": "北京南", "arr": null,             "dep": "2026-07-01T08:00"},
-            {"station_name": "济南西", "arr": "2026-07-01T10:30", "dep": "2026-07-01T10:35"},
             ...
         ]
         train_no      -- 车次号（可选，默认同 train_id）
-        total_seats   -- 总座位数（可选，默认 100）
+        total_seats   -- 总座位数（可选，默认 25）
+
+    定价熔断逻辑：
+        custom_price > 0 → train_info.price = custom_price（覆盖自动定价）
+        custom_price = 0 → train_info.price = 0（计价时走 train_models.base_rate）
 
     事务动作（任一失败则全部 rollback）：
         1. INSERT/UPDATE train_info
-        2. DELETE + INSERT train_stops（重新发布时覆盖旧停靠站）
-        3. DELETE + INSERT seat_status × 5（默认测试座位，mask 1/2/4/8/16）
+        2. DELETE + INSERT train_stops（按 stop_index 顺序写入）
+        3. DELETE + INSERT seat_status × 25（SWZ×5 + YDZ×5 + EDZ×15）
     """
     role = session.get('role')
     if role != 'ADMIN':
@@ -128,11 +132,15 @@ def api_add_train():
 
     data = request.json or {}
     train_id = data.get('train_id')
-    price = data.get('price', 0)
+    # 自定义定价覆盖：管理员可为特定车次设定固定基准价，0 表示走自动定价
+    custom_price = data.get('custom_price', 0)
+    if custom_price is None:
+        custom_price = 0
+    price = float(custom_price) if custom_price else 0
     departure_time = data.get('departure_time')
     stops = data.get('stops', [])
     train_no = data.get('train_no') or train_id
-    total_seats = data.get('total_seats', 100)
+    total_seats = data.get('total_seats', 25)  # V3.0: 默认 25 座
 
     # ---- 基础校验 ----
     if not train_id:
@@ -189,24 +197,33 @@ def api_add_train():
                      stop.get('dep') or None)
                 )
 
-            # ──── 3. 生成 5 个默认测试座位 ────
+            # ──── 3. 动态生成 25 个分级座位（V3.0: SWZ/YDZ/EDZ） ────
             cursor.execute(
                 "DELETE FROM seat_status WHERE train_id = %s", (train_id,)
             )
-            seat_nos = ['01A', '01B', '02A', '02B', '03A']
-            masks    = [0b00001, 0b00010, 0b00100, 0b01000, 0b10000]
-            for seat_no, mask in zip(seat_nos, masks):
-                cursor.execute(
-                    """INSERT INTO seat_status
-                       (train_id, carriage_no, seat_no, seat_bitmap, default_mask)
-                       VALUES (%s, 1, %s, 0, %s)""",
-                    (train_id, seat_no, mask)
-                )
+            seat_count = 0
+            for row in range(1, 6):                              # 排号 1~5
+                # V3.0 等级判定
+                if row == 1:
+                    class_code = 'SWZ'   # 商务座 3.0×
+                elif row == 2:
+                    class_code = 'YDZ'   # 一等座 1.6×
+                else:
+                    class_code = 'EDZ'   # 二等座 1.0×
+
+                for col in ['A', 'B', 'C', 'D', 'F']:            # 列名 A/B/C/D/F
+                    seat_no = f"{row:02d}{col}"                   # → 01A ~ 05F
+                    cursor.execute(
+                        """INSERT INTO seat_status
+                           (train_id, carriage_no, seat_no, class_code, seat_bitmap, default_mask)
+                           VALUES (%s, 1, %s, %s, 0, 0)""",
+                        (train_id, seat_no, class_code)
+                    )
+                    seat_count += 1
 
             # ──── 提交事务 ────
             conn.commit()
             stop_count = len(stops)
-            seat_count = len(seat_nos)
             return jsonify({
                 'ok': True,
                 'train_id': train_id,
@@ -247,13 +264,135 @@ def api_stops(train_id):
         conn.close()
 
 
+@app.route('/api/get_train_schedule', methods=['GET'])
+def api_get_train_schedule():
+    """返回指定车次的完整时刻表（所有经停站，按 stop_index 排序）。
+
+    参数：
+        train_id  -- 车次编号（必填）
+
+    返回字段：
+        stop_index, station_name, arrival_time, departure_time
+    """
+    train_id = request.args.get('train_id', '').strip()
+    if not train_id:
+        return jsonify({'error': 'train_id required'}), 400
+
+    conn = get_connection(autocommit=True)
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """SELECT stop_index, station_name, arrival_time, departure_time
+                   FROM train_stops
+                   WHERE train_id = %s
+                   ORDER BY stop_index ASC""",
+                (train_id,)
+            )
+            rows = cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+            return jsonify([dict(zip(cols, r)) for r in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/query_routes', methods=['GET'])
+def api_query_routes():
+    """智能站到站检索：模糊匹配 + 全量浏览双模式。
+
+    模式 A — 模糊检索（from_station 或 to_station 非空）：
+        使用 LIKE %keyword% 匹配，输入"北京"可搜到"北京南"。
+
+    模式 B — 浏览全部（两个参数均为空）：
+        返回所有车次的首站 → 末站完整路线。
+
+    返回字段：
+        train_id, train_no, base_rate,
+        departure_time, arrival_time, segment_count,
+        from_station_name, to_station_name  ← 真实的匹配/首末站名
+    """
+    from_station = request.args.get('from_station', '').strip()
+    to_station   = request.args.get('to_station', '').strip()
+
+    conn = get_connection(autocommit=True)
+    try:
+        with conn.cursor() as cursor:
+            if not from_station and not to_station:
+                # ──────── 模式 B：浏览全部车次 ────────
+                cursor.execute(
+                    """SELECT
+                           t.train_id,
+                           t.train_no,
+                           COALESCE(NULLIF(t.price, 0), m.base_rate, 100.00) AS base_rate,
+                           s_first.departure_time,
+                           s_last.arrival_time,
+                           s_first.station_name AS from_station_name,
+                           s_last.station_name   AS to_station_name,
+                           s_last.stop_index - s_first.stop_index AS segment_count
+                       FROM train_info t
+                       JOIN train_stops s_first
+                         ON t.train_id = s_first.train_id AND s_first.stop_index = 0
+                       JOIN train_stops s_last
+                         ON t.train_id = s_last.train_id
+                       LEFT JOIN train_models m
+                         ON m.type_code = LEFT(t.train_id, 1)
+                       WHERE s_last.stop_index = (
+                           SELECT MAX(stop_index) FROM train_stops
+                           WHERE train_id = t.train_id
+                       )
+                       ORDER BY t.train_id"""
+                )
+            else:
+                # ──────── 模式 A：模糊 LIKE 检索 ────────
+                # 至少一个字段非空时，另一个空串退化为 %% 匹配全部
+                like_from = f"%{from_station}%" if from_station else "%%"
+                like_to   = f"%{to_station}%"   if to_station   else "%%"
+
+                cursor.execute(
+                    """SELECT
+                           t.train_id,
+                           t.train_no,
+                           COALESCE(NULLIF(t.price, 0), m.base_rate, 100.00) AS base_rate,
+                           s_start.departure_time,
+                           s_end.arrival_time,
+                           s_start.station_name AS from_station_name,
+                           s_end.station_name   AS to_station_name,
+                           s_end.stop_index - s_start.stop_index AS segment_count
+                       FROM train_info t
+                       JOIN train_stops s_start
+                         ON t.train_id = s_start.train_id
+                       JOIN train_stops s_end
+                         ON t.train_id = s_end.train_id
+                       LEFT JOIN train_models m
+                         ON m.type_code = LEFT(t.train_id, 1)
+                       WHERE s_start.station_name LIKE %s
+                         AND s_end.station_name   LIKE %s
+                         AND s_start.stop_index < s_end.stop_index
+                       ORDER BY s_start.departure_time""",
+                    (like_from, like_to)
+                )
+
+            rows = cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+            return jsonify([dict(zip(cols, r)) for r in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
 @app.route('/api/my_orders')
 def api_my_orders():
-    """返回当前登录用户的所有订单（JOIN train_info + seat_status）。
+    """返回当前登录用户的所有订单，从 buy_mask 反向解码真实行程区间。
+
+    核心算法（位运算反向解码）：
+        start_index = (buy_mask & -buy_mask).bit_length() - 1  — 最右侧1的位置
+        end_index   = buy_mask.bit_length()                      — 最左侧1的下一位
 
     响应字段：
-        order_id, train_id, departure, arrival, seat_no, carriage_no,
-        price, order_status, buy_mask, create_time
+        order_id, train_id, departure, arrival, seat_no,
+        price, order_status, buy_mask, create_time, segments
     """
     user_id = session.get('user_id')
     if not user_id:
@@ -262,20 +401,19 @@ def api_my_orders():
     conn = get_connection(autocommit=True)
     try:
         with conn.cursor() as cursor:
+            # ════════════════════════════════════════════════════
+            # 步骤1：查询订单基础信息（联查 seat_status 获取座位号）
+            # ════════════════════════════════════════════════════
             cursor.execute(
                 """SELECT
                        o.order_id,
                        o.train_id,
-                       COALESCE(t.departure, '') AS departure,
-                       COALESCE(t.arrival,   '') AS arrival,
                        s.seat_no,
-                       s.carriage_no,
                        o.price,
                        o.order_status,
                        o.buy_mask,
                        o.create_time
                    FROM orders o
-                   LEFT JOIN train_info t ON o.train_id = t.train_id
                    LEFT JOIN seat_status s ON o.seat_id = s.seat_id
                    WHERE o.user_id = %s
                    ORDER BY o.create_time DESC""",
@@ -283,7 +421,54 @@ def api_my_orders():
             )
             rows = cursor.fetchall()
             cols = [d[0] for d in cursor.description]
-            return jsonify([dict(zip(cols, r)) for r in rows])
+            orders = [dict(zip(cols, r)) for r in rows]
+
+            if not orders:
+                return jsonify([])
+
+            # ════════════════════════════════════════════════════
+            # 步骤2：全量加载涉及车次的停靠站字典（内存缓存）
+            #        stops_dict[train_id][stop_index] = station_name
+            # ════════════════════════════════════════════════════
+            train_ids = list({o['train_id'] for o in orders if o.get('train_id')})
+            if not train_ids:
+                return jsonify(orders)
+
+            placeholders = ','.join(['%s'] * len(train_ids))
+            cursor.execute(
+                f"""SELECT train_id, station_name, stop_index
+                    FROM train_stops
+                    WHERE train_id IN ({placeholders})
+                    ORDER BY train_id, stop_index""",
+                train_ids
+            )
+            stops_dict = {}
+            for tid, station_name, stop_index in cursor.fetchall():
+                stops_dict.setdefault(tid, {})[stop_index] = station_name
+
+            # ════════════════════════════════════════════════════
+            # 步骤3 + 4：位运算反向解码 → 组装真实行程
+            # ════════════════════════════════════════════════════
+            for o in orders:
+                buy_mask = o.get('buy_mask', 0) or 0
+                tid = o.get('train_id', '')
+                stop_map = stops_dict.get(tid, {})
+
+                if buy_mask > 0 and stop_map:
+                    # 最右侧1的位置 → 上车站 stop_index
+                    start_index = (buy_mask & -buy_mask).bit_length() - 1
+                    # 最左侧1的下一位 → 下车站 stop_index
+                    end_index = buy_mask.bit_length()
+
+                    o['departure'] = stop_map.get(start_index, '?')
+                    o['arrival']   = stop_map.get(end_index, '?')
+                    o['segments']  = end_index - start_index
+                else:
+                    o['departure'] = '?'
+                    o['arrival']   = '?'
+
+            return jsonify(orders)
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
@@ -398,27 +583,138 @@ def api_buy():
             buy_mask = int(buy_mask or 0)
         segment_count = None  # 手动模式下无法知道区间数
 
-    # ---- 调用原有购票事务（悲观锁 + 位图冲突检测） ----
-    order_id = buy_ticket(user_id, train_id, carriage_no, seat_no, buy_mask)
-    if order_id:
-        resp = {'success': True, 'order_id': order_id, 'buy_mask': buy_mask}
-        if segment_count is not None:
-            resp['segments'] = segment_count
-        return jsonify(resp)
-    else:
+    # ════════════════════════════════════════════════════════════
+    # 执行购票事务：悲观锁 + 冲突检测 → 扣减库存 → 服务端重新计价 → 安全入账
+    # ════════════════════════════════════════════════════════════
+    conn = get_connection(autocommit=False)
+    try:
+        conn.begin()
+        with conn.cursor() as cursor:
+            # ── 1. 锁定座位行，获取 seat_id / 当前位图 / 席别代码 ──
+            cursor.execute(
+                """SELECT seat_id, seat_bitmap, class_code
+                   FROM seat_status
+                   WHERE train_id = %s AND seat_no = %s
+                   FOR UPDATE""",
+                (train_id, seat_no)
+            )
+            seat_row = cursor.fetchone()
+
+            if not seat_row:
+                conn.rollback()
+                return jsonify({
+                    'success': False,
+                    'reason': f'座位 {seat_no} 在车次 {train_id} 中不存在'
+                }), 400
+
+            seat_id = seat_row[0]
+            current_bitmap = seat_row[1] or 0
+            class_code = seat_row[2] or 'EDZ'
+
+            # ── 2. Python 层内存冲突检测（关键防线，杜绝超卖） ──
+            if (current_bitmap & buy_mask) != 0:
+                conn.rollback()
+                return jsonify({
+                    'success': False,
+                    'reason': '座位区间冲突（该区间已被他人购买）'
+                }), 400
+
+            # ── 3. 按位或扣减库存（先锁定库存，防止并发） ──
+            new_bitmap = current_bitmap | buy_mask
+            cursor.execute(
+                """UPDATE seat_status
+                   SET seat_bitmap = %s
+                   WHERE seat_id = %s""",
+                (new_bitmap, seat_id)
+            )
+
+            # ── 4. 服务端重新计价（绝对安全：不信任前端任何金额） ──
+            #  4a. 查基准价（特权熔断：管理员自定义 > 前缀自动定价 > 兜底 100）
+            cursor.execute(
+                """SELECT COALESCE(NULLIF(ti.price, 0), tm.base_rate, 100.00) AS base_rate
+                   FROM train_info ti
+                   LEFT JOIN train_models tm ON tm.type_code = LEFT(ti.train_id, 1)
+                   WHERE ti.train_id = %s""",
+                (train_id,)
+            )
+            rate_row = cursor.fetchone()
+            base_rate = rate_row[0] if rate_row else 100.00
+
+            #  4b. 查 seat_classes 获取当前座位等级倍率
+            cursor.execute(
+                "SELECT price_multiplier FROM seat_classes WHERE class_code = %s",
+                (class_code,)
+            )
+            mult_row = cursor.fetchone()
+            price_multiplier = mult_row[0] if mult_row else 1.0
+
+            #  4c. 站数差（段数）：优先用动态路由计算值，手动掩码模式则用位计数兜底
+            segs = segment_count if segment_count is not None else bin(buy_mask).count('1')
+
+            #  4d. 高精度 Decimal 计价（杜绝浮点误差写入 DECIMAL 列）
+            actual_price = (
+                Decimal(str(segs))
+                * Decimal(str(base_rate))
+                * Decimal(str(price_multiplier))
+            ).quantize(Decimal('0.00'))
+
+            # ── 5. 安全入账：写入订单（金额为服务端二次计算结果） ──
+            order_id = 'ORD' + uuid.uuid4().hex[:10].upper()
+            cursor.execute(
+                """INSERT INTO orders
+                   (order_id, user_id, train_id, seat_id, buy_mask, price, order_status, status)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'PAID', 1)""",
+                (order_id, user_id, train_id, seat_id, buy_mask, actual_price)
+            )
+
+            # ── 5b. 写入金融级流水账本（审计追踪） ──
+            cursor.execute(
+                """INSERT INTO transaction_logs
+                   (order_id, user_id, action_type, amount)
+                   VALUES (%s, %s, 'PAY', %s)""",
+                (order_id, user_id, actual_price)
+            )
+
+            # ── 6. 提交事务 ──
+            conn.commit()
+
+            resp = {
+                'success': True,
+                'order_id': order_id,
+                'buy_mask': buy_mask,
+                'price': actual_price,
+                'class_code': class_code,
+                'segments': segs
+            }
+            return jsonify(resp)
+
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return jsonify({
             'success': False,
-            'reason': '座位区间冲突（该区间已被他人购买）或座位不存在'
-        }), 400
+            'reason': f'系统异常：{e}'
+        }), 500
+    finally:
+        conn.close()
 
 
 @app.route('/api/refund', methods=['POST'])
 def api_refund():
-    """退票接口（支持 ADMIN 任意退 + USER 退自己的票）。
+    """退票接口 — 纯 Python 事务控制（不再依赖数据库触发器）。
 
     ADMIN：可退任意订单。
-    USER： 必须在 SQL 层面强校验 order_id 归属当前 session['user_id']，
-           防止越权退票。
+    USER：  只能退自己的订单。
+
+    核心事务流程：
+        1. 开启显式事务 conn.begin()
+        2. SELECT ... FOR UPDATE 锁定订单行（带 order_status='PAID' 防重）
+        3. 校验 seat_id 非空、权限合法
+        4. UPDATE orders → REFUNDED（rowcount 必须 == 1）
+        5. UPDATE seat_status SET seat_bitmap = seat_bitmap ^ buy_mask（rowcount 必须 == 1）
+        6. conn.commit()（任何异常回滚，保证库存与订单的强一致性）
     """
     order_id = request.json.get('order_id')
     if not order_id:
@@ -432,24 +728,38 @@ def api_refund():
 
     conn = get_connection(autocommit=False)
     try:
+        # ════════════════════════════════════════════════════════
+        # 步骤 1：开启显式事务
+        # ════════════════════════════════════════════════════════
+        conn.begin()
+
         with conn.cursor() as cursor:
-            # 先查订单状态（防止重复退票）
+            # ════════════════════════════════════════════════════
+            # 步骤 2：SELECT ... FOR UPDATE 锁定订单行
+            #         带 order_status='PAID' 防重复退票
+            # ════════════════════════════════════════════════════
             cursor.execute(
-                "SELECT user_id, order_status FROM orders WHERE order_id = %s FOR UPDATE",
+                """SELECT user_id, seat_id, buy_mask, price
+                   FROM orders
+                   WHERE order_id = %s AND order_status = 'PAID'
+                   FOR UPDATE""",
                 (order_id,)
             )
             row = cursor.fetchone()
+
             if not row:
                 conn.rollback()
-                return jsonify({'error': '订单不存在'}), 404
+                return jsonify({'error': '订单不存在或已退票'}), 404
 
-            owner_id, current_status = row[0], row[1] if len(row) > 1 else None
+            owner_id, seat_id, buy_mask, refund_price = row
 
-            if current_status == 'REFUNDED':
+            # ════════════════════════════════════════════════════
+            # 步骤 3：数据完整性 + 权限校验
+            # ════════════════════════════════════════════════════
+            if seat_id is None:
                 conn.rollback()
-                return jsonify({'error': '该订单已退票，不能重复操作'}), 400
+                return jsonify({'error': '订单数据异常：seat_id 为空，无法释放库存'}), 500
 
-            # ── 权限校验 ──
             if role == 'ADMIN':
                 pass  # 管理员可退任意订单
             elif role == 'USER':
@@ -460,15 +770,48 @@ def api_refund():
                 conn.rollback()
                 return jsonify({'error': 'forbidden — 未知角色'}), 403
 
-            # ── 执行退票：双写 status + order_status ──
-            cursor.execute(
+            # ════════════════════════════════════════════════════
+            # 步骤 4：更新订单状态（rowcount 强校验）
+            # ════════════════════════════════════════════════════
+            affected_orders = cursor.execute(
                 """UPDATE orders
-                   SET status = 2, order_status = 'REFUNDED'
-                   WHERE order_id = %s""",
+                   SET order_status = 'REFUNDED', status = 2
+                   WHERE order_id = %s AND order_status = 'PAID'""",
                 (order_id,)
             )
-            # 触发器 trg_orders_after_update_refund 会自动释放 seat_bitmap
+            if affected_orders != 1:
+                conn.rollback()
+                return jsonify({'error': '退票失败：订单状态异常（可能已被并发退票）'}), 409
+
+            # ════════════════════════════════════════════════════
+            # 步骤 5：库存释放 —— 位图异或 ^ 运算（rowcount 强校验）
+            #
+            # 购票时: seat_bitmap = seat_bitmap | buy_mask   (OR  置位)
+            # 退票时: seat_bitmap = seat_bitmap ^ buy_mask   (XOR 清零)
+            # ════════════════════════════════════════════════════
+            affected_seats = cursor.execute(
+                """UPDATE seat_status
+                   SET seat_bitmap = seat_bitmap ^ %s
+                   WHERE seat_id = %s""",
+                (buy_mask, seat_id)
+            )
+            if affected_seats != 1:
+                conn.rollback()
+                return jsonify({'error': '退票失败：座位记录丢失，无法释放库存'}), 500
+
+            # 写入金融级流水账本（审计追踪）
+            cursor.execute(
+                """INSERT INTO transaction_logs
+                   (order_id, user_id, action_type, amount)
+                   VALUES (%s, %s, 'REFUND', %s)""",
+                (order_id, owner_id, refund_price)
+            )
+
+            # ════════════════════════════════════════════════════
+            # 步骤 6：提交事务
+            # ════════════════════════════════════════════════════
             conn.commit()
+
     except Exception as e:
         try:
             conn.rollback()
@@ -477,6 +820,7 @@ def api_refund():
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
+
     return jsonify({'ok': True})
 
 
@@ -524,6 +868,35 @@ def api_financial():
                 return jsonify([dict(zip(cols, r)) for r in rows])
             except Exception as e:
                 return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/finance/logs')
+def api_finance_logs():
+    """金融级流水账本：按时间倒序返回最近 100 条流水记录。
+
+    返回字段：
+        log_id, order_id, user_id, action_type, amount, create_time
+    """
+    role = session.get('role')
+    if role != 'ADMIN':
+        return jsonify({'error': 'forbidden'}), 403
+
+    conn = get_connection(autocommit=True)
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """SELECT log_id, order_id, user_id, action_type, amount, create_time
+                   FROM transaction_logs
+                   ORDER BY create_time DESC
+                   LIMIT 100"""
+            )
+            rows = cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+            return jsonify([dict(zip(cols, r)) for r in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
 
