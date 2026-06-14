@@ -102,6 +102,69 @@ def api_trains():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/admin/trains', methods=['GET'])
+def api_admin_trains():
+    """管理员接口：返回 train_info 中所有车次（字典格式 JSON）。"""
+    role = session.get('role')
+    if role != 'ADMIN':
+        return jsonify({'error': 'forbidden'}), 403
+
+    conn = get_connection(autocommit=True)
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """SELECT train_id, train_no, departure, arrival,
+                          departure_time, price, total_seats
+                   FROM train_info ORDER BY train_id"""
+            )
+            rows = cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+            return jsonify([dict(zip(cols, r)) for r in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/admin/trains/<train_id>', methods=['DELETE'])
+def api_admin_delete_train(train_id):
+    """管理员接口：级联删除车次。"""
+    role = session.get('role')
+    if role != 'ADMIN':
+        return jsonify({'error': 'forbidden'}), 403
+
+    conn = get_connection(autocommit=False)
+    try:
+        conn.begin()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT train_id FROM train_info WHERE train_id = %s FOR UPDATE",
+                (train_id,)
+            )
+            if not cursor.fetchone():
+                conn.rollback()
+                return jsonify({'error': f'车次 {train_id} 不存在'}), 404
+
+            cursor.execute("DELETE FROM orders WHERE train_id = %s", (train_id,))
+            cursor.execute("DELETE FROM seat_status WHERE train_id = %s", (train_id,))
+            cursor.execute("DELETE FROM train_info WHERE train_id = %s", (train_id,))
+
+            conn.commit()
+            return jsonify({
+                'ok': True,
+                'deleted': train_id,
+                'message': f'车次 {train_id} 及其关联座位、订单、经停站已全部清理'
+            })
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
 @app.route('/api/add_train', methods=['POST'])
 def api_add_train():
     """管理员接口：发布新车次（V3.1 — 支持自定义定价覆盖 + 事务写入）。
