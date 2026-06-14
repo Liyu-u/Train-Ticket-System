@@ -151,8 +151,11 @@ def ensure_tables():
                     COUNT(o.order_id) AS total_orders,
                     SUM(CASE WHEN o.status = 1 THEN 1 ELSE 0 END) AS paid_orders,
                     SUM(CASE WHEN o.status = 2 THEN 1 ELSE 0 END) AS refunded_orders,
-                    COALESCE(SUM(CASE WHEN o.status = 1 THEN o.price ELSE 0 END), 0) AS total_sales,
+                    /* 总销售额：统计所有订单的流水（无论是否退票，反映真实营收轨迹） */
+                    COALESCE(SUM(o.price), 0) AS total_sales,
+                    /* 退款额：只统计已退票的 */
                     COALESCE(SUM(CASE WHEN o.status = 2 THEN o.price ELSE 0 END), 0) AS refund_amount,
+                    /* 净利润：只统计最后留下来（已支付）的 */
                     COALESCE(SUM(CASE WHEN o.status = 1 THEN o.price ELSE 0 END), 0) AS net_revenue
                 FROM train_info t
                 LEFT JOIN orders o ON t.train_id = o.train_id
