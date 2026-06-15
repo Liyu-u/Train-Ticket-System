@@ -176,7 +176,7 @@ def ensure_tables():
             # ---- 注入金融级防篡改触发器 (Triggers) ----
             # 触发器 1：拦截购票动作 (AFTER INSERT)
             cursor.execute('''
-                CREATE TRIGGER IF NOT EXISTS trg_after_order_insert
+                CREATE TRIGGER trg_after_order_insert
                 AFTER INSERT ON orders
                 FOR EACH ROW
                 BEGIN
@@ -190,7 +190,7 @@ def ensure_tables():
 
             # 触发器 2：拦截退票动作 (AFTER UPDATE)
             cursor.execute('''
-                CREATE TRIGGER IF NOT EXISTS trg_after_order_update
+                CREATE TRIGGER trg_after_order_update
                 AFTER UPDATE ON orders
                 FOR EACH ROW
                 BEGIN

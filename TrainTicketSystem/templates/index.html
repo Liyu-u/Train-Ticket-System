@@ -609,7 +609,7 @@
 
             <div class="row g-3">
                 <!-- ═══════════ 左栏：发布新车次 + 强制退票 ═══════════ -->
-                <div class="col-md-4">
+                <div class="col-md-5">
                     <div class="card shadow-sm h-100" style="max-height: 88vh; overflow-y: auto;">
                         <div class="card-header bg-light fw-bold small text-secondary py-2">
                             ➕ 发布新车次 <span class="text-muted fw-normal">(首尾固定+经停站动态插入)</span>
@@ -699,9 +699,9 @@
                 </div>
 
                 <!-- ═══════════ 右栏：车次监控看板 + 财务 ═══════════ -->
-                <div class="col-md-8">
+                <div class="col-md-7 d-flex flex-column" style="max-height: 88vh;">
                     <!-- 车次列表 -->
-                    <div class="card shadow-sm mb-3" style="max-height: 55vh; overflow-y: auto;">
+                    <div class="card shadow-sm mb-3" style="flex: 1 1 42%; overflow-y: auto; min-height: 0;">
                         <div class="card-header bg-white fw-bold d-flex justify-content-between align-items-center py-2" style="border-bottom: 2px solid #dc2626;">
                             <span class="small text-danger">🚂 实时车次监控看板 <small class="text-muted fw-normal">(具备级联删除权限)</small></span>
                             <button class="btn btn-xs btn-outline-danger" style="font-size: 0.7rem; padding: 2px 8px;" onclick="loadAdminTrains()">🔄 刷新调度</button>
@@ -729,7 +729,7 @@
                     </div>
 
                     <!-- 财务大盘 + 流水 -->
-                    <div class="card shadow-sm" style="max-height: 38vh; overflow-y: auto;">
+                    <div class="card shadow-sm" style="flex: 1 1 55%; overflow-y: auto; min-height: 0;">
                         <div class="card-header bg-info text-white fw-bold py-2 small d-flex justify-content-between align-items-center">
                             <span>📊 系统财务大盘</span>
                             <button class="btn btn-sm btn-outline-light" style="font-size:0.7rem;" onclick="loadFinancial()">一键核算</button>
@@ -1868,7 +1868,7 @@
                             <button class="btn btn-xs btn-danger py-0 px-2"
                                     onclick="executeCascadeDelete('${trainId}')"
                                     style="font-size: 0.72rem; line-height: 1.5;">
-                                熔断删除
+                                删除
                             </button>
                         </td>
                     </tr>`;
@@ -1881,7 +1881,7 @@
     }
 
     function executeCascadeDelete(trainId) {
-        if (!confirm(`⚠️ 警告：正在请求熔断车次 [ ${trainId} ]\n\n该操作会通过外键自动触发以下原子级连带清理：\n1. 释放该列车所有已占用位图（解冻座位）\n2. 瞬间注销所有关联订单\n3. 彻底清空经停站数据\n\n确定执行此高危管理操作吗？`)) {
+        if (!confirm(`⚠️ 确定要删除车次 [ ${trainId} ] 吗？\n\n该操作将同时清理：\n1. 该车次的所有经停站\n2. 该车次的所有座位\n3. 该车次的所有关联订单\n\n此操作不可撤销！`)) {
             return;
         }
 
@@ -1889,7 +1889,7 @@
             .then(res => res.json())
             .then(data => {
                 if (data.ok || data.message) {
-                    alert(`✅ 级联清理成功: ${data.message || '该车次已成历史'}`);
+                    alert(`✅ ${data.message || '车次已删除'}`);
                     loadAdminTrains();
                     if (typeof loadFinancial === 'function') loadFinancial();
                 } else {
