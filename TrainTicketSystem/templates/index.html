@@ -484,11 +484,53 @@
                 <label class="form-label text-muted small">用户名</label>
                 <input type="text" id="username" class="form-control" placeholder="输入 admin 或 zhangsan">
             </div>
-            <div class="mb-4">
-                <label class="form-label text-muted small">密码</label>
-                <input type="password" id="password" class="form-control" placeholder="输入 123456">
+            <div class="mb-3">
+                <label for="login-password" class="form-label small text-muted">密码</label>
+                <input type="password" class="form-control" id="login-password">
             </div>
-            <button class="btn btn-primary w-100 fw-bold" onclick="login()">立 即 登 录</button>
+
+            <div class="d-grid gap-2 mb-3">
+                <button type="button" class="btn btn-primary fw-bold" onclick="login()">立即登录</button>
+            </div>
+
+            <div class="text-center mt-2">
+                <span class="text-primary small"
+                      style="cursor: pointer; text-decoration: underline;"
+                      onclick="showRegisterModal()">
+                    没有账号？注册账户
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════ 注册账户 Modal (Bootstrap 5) ═══════════ -->
+    <div class="modal fade" id="registerModal" tabindex="-1" aria-labelledby="registerModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content shadow">
+                <div class="modal-header bg-light">
+                    <h5 class="modal-title fw-bold" id="registerModalLabel">📝 注册新账户</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body p-4">
+                    <div class="mb-3">
+                        <label class="form-label small text-muted">用户名</label>
+                        <input type="text" class="form-control" id="reg-username" placeholder="至少 2 个字符">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-muted">密码</label>
+                        <input type="password" class="form-control" id="reg-password" placeholder="至少 4 个字符">
+                    </div>
+                    <div class="mb-4">
+                        <label class="form-label small text-muted">确认密码</label>
+                        <input type="password" class="form-control" id="reg-password-confirm" placeholder="再次输入密码">
+                    </div>
+                    <div id="reg-feedback" class="small mb-3"></div>
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-primary" onclick="doRegister()">立即注册</button>
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -766,6 +808,8 @@
 
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
 <script>
     // 页面加载时自动检查登录状态并加载车次
     window.onload = function() { 
@@ -774,40 +818,46 @@
     }
 
     function checkAuth() {
-        let role = localStorage.getItem('role'); // 拿到的可能是大写，也可能是小写
+        let role = localStorage.getItem('role');
         const username = localStorage.getItem('username');
-        
+
+        // 权限导航按钮
+        const navAdminBtn = document.getElementById('nav-admin-btn');
+
         if (!role) {
             document.getElementById('login-view').style.display = 'block';
             document.getElementById('user-view').style.display = 'none';
             document.getElementById('admin-view').style.display = 'none';
             document.getElementById('nav-bar').style.display = 'none';
+            if (navAdminBtn) navAdminBtn.style.display = 'none';
         } else {
-            role = role.toLowerCase(); // 【核心修复】：不管三七二十一，全给它转成小写再判断！
-            
+            role = role.toLowerCase();
+
             if (role === 'admin') {
                 document.getElementById('login-view').style.display = 'none';
                 document.getElementById('user-view').style.display = 'none';
                 document.getElementById('admin-view').style.display = 'block';
                 document.getElementById('nav-bar').style.display = 'flex';
                 document.getElementById('user-info').innerText = '管理员 (' + username + ')';
-                initStopRows();  // 初始化经停站表单
-                loadAdminTrains();  // 加载车次监控看板
+                if (navAdminBtn) navAdminBtn.style.display = '';      // 解锁管理入口
+                initStopRows();
+                loadAdminTrains();
             } else if (role === 'user') {
                 document.getElementById('login-view').style.display = 'none';
                 document.getElementById('user-view').style.display = 'block';
                 document.getElementById('admin-view').style.display = 'none';
                 document.getElementById('nav-bar').style.display = 'flex';
                 document.getElementById('user-info').innerText = '旅客 (' + username + ')';
-                loadTrainList();  // 加载车次下拉框
-                loadMyOrders();   // 加载个人订单列表
+                if (navAdminBtn) navAdminBtn.style.display = 'none';  // 隐藏管理入口
+                loadTrainList();
+                loadMyOrders();
             }
         }
     }
 
     function login() {
         const u = document.getElementById('username').value;
-        const p = document.getElementById('password').value;
+        const p = document.getElementById('login-password').value;
         if(!u || !p) { alert('请输入账号和密码！'); return; }
         
         fetch('/api/login', {
@@ -829,6 +879,54 @@
         fetch('/api/logout', {method: 'POST'}).then(() => {
             localStorage.clear();
             checkAuth();
+        });
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // 注册相关
+    // ════════════════════════════════════════════════════════════
+    // 强制唤醒 Bootstrap 5 弹窗
+    function showRegisterModal() {
+        // 找到咱们那个弹窗的 HTML 元素
+        var modalElement = document.getElementById('registerModal');
+        // 使用 Bootstrap 原生 API 实例化并显示
+        var myModal = new bootstrap.Modal(modalElement);
+        myModal.show();
+    }
+
+    function closeRegisterModal() {
+        bootstrap.Modal.getInstance(document.getElementById('registerModal')).hide();
+    }
+
+    function doRegister() {
+        const u  = document.getElementById('reg-username').value.trim();
+        const p  = document.getElementById('reg-password').value;
+        const p2 = document.getElementById('reg-password-confirm').value;
+        const fb = document.getElementById('reg-feedback');
+
+        if (!u || u.length < 2) { fb.innerHTML = '<span class="text-danger">用户名至少 2 个字符</span>'; return; }
+        if (!p || p.length < 4) { fb.innerHTML = '<span class="text-danger">密码至少 4 个字符</span>'; return; }
+        if (p !== p2)           { fb.innerHTML = '<span class="text-danger">两次密码不一致</span>'; return; }
+
+        fb.innerHTML = '<span class="text-info">注册中...</span>';
+
+        fetch('/api/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: u, password: p })
+        }).then(res => res.json()).then(data => {
+            if (data.success) {
+                fb.innerHTML = '<span class="text-success">✅ ' + data.message + '</span>';
+                setTimeout(() => {
+                    closeRegisterModal();
+                    document.getElementById('username').value = u;
+                    document.getElementById('password').value = '';
+                }, 1200);
+            } else {
+                fb.innerHTML = '<span class="text-danger">❌ ' + (data.message || '注册失败') + '</span>';
+            }
+        }).catch(err => {
+            fb.innerHTML = '<span class="text-danger">网络请求失败</span>';
         });
     }
 

@@ -4,12 +4,26 @@ import uuid
 from decimal import Decimal
 
 from flask import Flask, request, jsonify, render_template, session
+from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = 'any_secret_string_you_like'
 
 from utils.db_helper import get_connection
 from services.ticket_service import query_seats, query_trains
+
+
+# ---------------------------------------------------------------------------
+# 管理员权限装饰器
+# ---------------------------------------------------------------------------
+def admin_required(f):
+    """装饰器：校验 session['role_type'] == 'ADMIN'，否则返回 403。"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if session.get('role_type') != 'ADMIN':
+            return jsonify({'error': '越权警告：权限不足'}), 403
+        return f(*args, **kwargs)
+    return decorated
 
 
 # ---------------------------------------------------------------------------
@@ -103,12 +117,9 @@ def api_trains():
 
 
 @app.route('/api/admin/trains', methods=['GET'])
+@admin_required
 def api_admin_trains():
     """管理员接口：返回 train_info 中所有车次（字典格式 JSON）。"""
-    role = session.get('role')
-    if role != 'ADMIN':
-        return jsonify({'error': 'forbidden'}), 403
-
     conn = get_connection(autocommit=True)
     try:
         with conn.cursor() as cursor:
@@ -127,12 +138,9 @@ def api_admin_trains():
 
 
 @app.route('/api/admin/trains/<train_id>', methods=['DELETE'])
+@admin_required
 def api_admin_delete_train(train_id):
     """管理员接口：级联删除车次。"""
-    role = session.get('role')
-    if role != 'ADMIN':
-        return jsonify({'error': 'forbidden'}), 403
-
     conn = get_connection(autocommit=False)
     try:
         conn.begin()
@@ -874,6 +882,52 @@ def api_refund():
     return jsonify({'ok': True})
 
 
+@app.route('/api/register', methods=['POST'])
+def api_register():
+    """用户注册接口：校验唯一性 → 哈希密码 → 写入 users 表，强制 role_type='USER'。
+
+    请求体：{"username": "...", "password": "..."}
+    """
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+    password = (data.get('password') or '').strip()
+
+    if not username or len(username) < 2:
+        return jsonify({'success': False, 'message': '用户名至少 2 个字符'}), 400
+    if not password or len(password) < 4:
+        return jsonify({'success': False, 'message': '密码至少 4 个字符'}), 400
+
+    conn = get_connection(autocommit=True)
+    try:
+        with conn.cursor() as cursor:
+            # 查重
+            cursor.execute("SELECT 1 FROM users WHERE username = %s", (username,))
+            if cursor.fetchone():
+                return jsonify({'success': False, 'message': '用户名已被注册'}), 409
+
+            # 生成 user_id + 哈希密码，强制绑定 role_type = 'USER'
+            user_id = 'U_' + uuid.uuid4().hex[:12].upper()
+            hashed = hash_password(password)
+
+            cursor.execute(
+                """INSERT INTO users (user_id, username, password, role_type)
+                   VALUES (%s, %s, %s, 'USER')""",
+                (user_id, username, hashed)
+            )
+
+        return jsonify({
+            'success': True,
+            'message': '注册成功，请登录',
+            'user_id': user_id,
+            'username': username
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'注册失败：{e}'}), 500
+    finally:
+        conn.close()
+
+
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
@@ -882,12 +936,15 @@ def login():
 
     user_id, role = lookup_user(username, password)
     if user_id and role:
-        session['role'] = role.upper()
-        session['user_id'] = user_id
-        session['username'] = username
+        # 双键写入：兼容旧代码的同时满足 role_type 规范
+        role_upper = role.upper()
+        session['role']      = role_upper
+        session['role_type'] = role_upper
+        session['user_id']   = user_id
+        session['username']  = username
         return jsonify({
             'success': True,
-            'role': role.upper(),
+            'role': role_upper,
             'username': username
         })
     else:
@@ -901,11 +958,8 @@ def api_logout():
 
 
 @app.route('/api/financial')
+@admin_required
 def api_financial():
-    role = session.get('role')
-    if role != 'ADMIN':
-        return jsonify({'error': 'forbidden'}), 403
-
     conn = get_connection(autocommit=True)
     try:
         with conn.cursor() as cursor:
@@ -923,16 +977,9 @@ def api_financial():
 
 
 @app.route('/api/finance/logs')
+@admin_required
 def api_finance_logs():
-    """金融级流水账本：按时间倒序返回最近 100 条流水记录。
-
-    返回字段：
-        log_id, order_id, user_id, action_type, amount, create_time
-    """
-    role = session.get('role')
-    if role != 'ADMIN':
-        return jsonify({'error': 'forbidden'}), 403
-
+    """金融级流水账本：按时间倒序返回最近 100 条流水记录。"""
     conn = get_connection(autocommit=True)
     try:
         with conn.cursor() as cursor:
